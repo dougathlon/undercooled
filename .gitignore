@@ -1,0 +1,26 @@
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+playwright-report/
+test-results/
+blob-report/
+release/
+*.zip
+*.tsbuildinfo
+
+# Keep only the public provenance note; raw generations and working previews stay local.
+art-source/*
+!art-source/ART_PROVENANCE.md
+
+# Local credentials and tool state must never enter the public playtest repository.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.cache/
+.vite/
+
+.DS_Store
+*.log

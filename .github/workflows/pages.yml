@@ -1,0 +1,136 @@
+name: Verify and deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: undercooled-pages
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Check, build, and browser-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Audit the public source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          for forbidden_entry in release art-source/characters dist test-results playwright-report public/assets/environment/auric-nerveworks.png; do
+            if [[ -n "$(git ls-files "$forbidden_entry")" ]]; then
+              echo "Public repository contains forbidden material: $forbidden_entry" >&2
+              exit 1
+            fi
+          done
+
+          unexpected_art="$(git ls-files art-source | grep -v '^art-source/ART_PROVENANCE\.md$' || true)"
+          if [[ -n "$unexpected_art" ]]; then
+            echo "Only the art provenance note may be published from art-source:" >&2
+            echo "$unexpected_art" >&2
+            exit 1
+          fi
+
+          credential_files="$(git ls-files '.env' '.env.*' '*.key' '*.pem' | grep -v '^\.env\.example$' || true)"
+          if [[ -n "$credential_files" ]]; then
+            echo "Public repository contains credential-bearing file names:" >&2
+            echo "$credential_files" >&2
+            exit 1
+          fi
+
+          if git grep -nEI '(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|/Users/|OneDrive-Personal|starkdj@|doug\.j\.stark@|Moth auxiliary|control[- ]cassette|cassette)' -- . ':!.github/workflows/pages.yml' ':!tests/e2e/undercooled.spec.ts'; then
+            echo "Publication audit found a credential, private path, private email, unapproved brand, or retired cassette copy." >&2
+            exit 1
+          fi
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.16.0
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check and unit-test
+        run: pnpm run check
+
+      - name: Build for the Pages subpath
+        run: pnpm run build:pages
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Test the production build
+        run: pnpm run test:e2e:built
+
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: undercooled-browser-evidence
+          path: |
+            test-results
+            playwright-report
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload verified site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy verified site
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  live-smoke:
+    name: Verify live Pages files
+    needs: deploy
+    runs-on: ubuntu-latest
+    env:
+      PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+    steps:
+      - name: Fetch the deployed page and its entry module
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_url="${PAGE_URL%/}/"
+          curl --fail --silent --show-error --location --retry 10 --retry-all-errors --retry-delay 3 \
+            "$site_url" --output index.html
+          grep -q 'name="robots" content="noindex' index.html
+          module_path="$(grep -oE 'src="[^"]+\.js"' index.html | head -n 1 | cut -d '"' -f 2)"
+          test -n "$module_path"
+          module_url="$(node -e 'console.log(new URL(process.argv[1], process.argv[2]).href)' "$module_path" "$site_url")"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            "$module_url" --output /dev/null
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            "${site_url}THIRD_PARTY_NOTICES.txt" --output /dev/null
