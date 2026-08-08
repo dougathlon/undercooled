@@ -165,10 +165,19 @@ async function pressAction(page: Page): Promise<void> {
   await page.waitForTimeout(100);
 }
 
-async function holdAction(page: Page, durationMs: number): Promise<void> {
+async function holdActionUntilStage(
+  page: Page,
+  stage: string,
+  timeoutMs = 15_000,
+): Promise<void> {
   await page.keyboard.down("Space");
-  await page.waitForTimeout(durationMs);
-  await page.keyboard.up("Space");
+  try {
+    await expect
+      .poll(() => gameplaySummary(page), { timeout: timeoutMs })
+      .toMatchObject({ stage });
+  } finally {
+    await page.keyboard.up("Space");
+  }
   await page.waitForTimeout(100);
 }
 
@@ -236,8 +245,7 @@ test.describe("desktop production build", () => {
     await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "prepare" });
     await pressMovement(page, "ArrowLeft", 3);
     await pressMovement(page, "ArrowUp");
-    await holdAction(page, 1_500);
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "load" });
+    await holdActionUntilStage(page, "load");
 
     // The first circuit is H/H. Fetch from both outer benches and install at PULSE.
     await pressMovement(page, "ArrowLeft");

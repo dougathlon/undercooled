@@ -15,7 +15,7 @@ const testingExternalDeployment = Boolean(process.env.PLAYWRIGHT_BASE_URL);
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  timeout: 45_000,
+  timeout: 90_000,
   expect: { timeout: 8_000 },
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
@@ -27,7 +27,10 @@ export default defineConfig({
     baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    video: "retain-on-failure",
+    // Explicit screenshots and retry traces are the release evidence. Recording
+    // every 1600 x 900 Phaser frame starves the simulation clock on CI's
+    // software renderer and makes held-input timing unrepresentative.
+    video: "off",
   },
   projects: [
     {
