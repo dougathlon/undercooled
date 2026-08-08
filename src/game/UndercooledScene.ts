@@ -92,6 +92,7 @@ export class UndercooledScene extends Phaser.Scene {
   private renderedState: GameState | null = null;
   private renderedLevelId = 0;
   private lastEventId = 0;
+  private lastSimulationTickAtMs = 0;
 
   constructor(session: GameSession) {
     super({ key: "undercooled" });
@@ -167,10 +168,18 @@ export class UndercooledScene extends Phaser.Scene {
     this.redrawStatic(state);
     this.snapActors(state);
     this.syncView(state, 16);
+    this.lastSimulationTickAtMs = performance.now();
   }
 
   update(_time: number, delta: number): void {
-    this.session.tick(delta);
+    const now = performance.now();
+    const elapsedMs = Math.max(0, now - this.lastSimulationTickAtMs);
+    this.lastSimulationTickAtMs = now;
+
+    // Phaser smooths render delta aggressively when the renderer is slow. The
+    // service simulation must follow elapsed play time instead; its own 250 ms
+    // cap prevents a hidden or stalled tab from jumping through deadlines.
+    this.session.tick(elapsedMs);
     const state = this.session.getState();
     if (state !== this.renderedState || state.level.id !== this.renderedLevelId) {
       this.redrawStatic(state);
