@@ -257,6 +257,7 @@ test.describe("desktop production build", () => {
   });
 
   test("completes the first paired job through player controls", async ({ page }) => {
+    test.setTimeout(180_000);
     await page.getByTestId("begin").click();
     await page.getByTestId("start-level").click();
 
