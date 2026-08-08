@@ -18,6 +18,10 @@ export default defineConfig({
   timeout: 90_000,
   expect: { timeout: 8_000 },
   fullyParallel: false,
+  // Each project renders a full 1600 x 900 WebGL scene. Running desktop and
+  // touch projects concurrently on a software-rendered CI runner distorts both
+  // input timing and the game's wall-clock simulation.
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI
