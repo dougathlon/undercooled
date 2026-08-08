@@ -121,6 +121,20 @@ async function actorPositions(page: Page): Promise<ActorPositions> {
   });
 }
 
+async function simulationTime(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const api = (window as typeof window & {
+      __UNDERCOOLED__?: { state: () => unknown };
+    }).__UNDERCOOLED__;
+    if (!api) throw new Error("Undercooled debug API is unavailable.");
+    const state = api.state() as { simTimeMs?: unknown };
+    if (typeof state.simTimeMs !== "number") {
+      throw new Error("Debug state does not expose the simulation clock.");
+    }
+    return state.simTimeMs;
+  });
+}
+
 async function gameplaySummary(page: Page): Promise<GameplaySummary> {
   return page.evaluate(() => {
     const api = (window as typeof window & {
@@ -155,8 +169,14 @@ async function pressMovement(
   count = 1,
 ): Promise<void> {
   for (let index = 0; index < count; index += 1) {
+    const before = await simulationTime(page);
     await page.keyboard.press(key);
-    await page.waitForTimeout(180);
+    // The simulation intentionally debounces movement in simulation time. Pace
+    // discrete player inputs against that clock so a slow software renderer
+    // cannot collapse two valid keypresses into the same movement-lock window.
+    await expect
+      .poll(() => simulationTime(page), { timeout: 8_000 })
+      .toBeGreaterThanOrEqual(before + 160);
   }
 }
 
