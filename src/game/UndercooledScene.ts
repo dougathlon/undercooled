@@ -12,10 +12,6 @@ import {
   READOUT_POSITION,
   RESERVOIR_POSITION,
   SUPPLY_POSITIONS,
-  counterToWorld,
-  gridToWorld,
-  laneWorldDelta,
-  supplyToWorld,
 } from "../simulation/geometry";
 import type {
   ActorPose,
@@ -23,28 +19,39 @@ import type {
   GameEvent,
   GameState,
   GridPosition,
-  ItemState,
-  JobStage,
+  ItemKind,
   LaneId,
   Provenance,
+  PulseKind,
 } from "../simulation/types";
 import { LANE_IDS } from "../simulation/types";
 import type { GameSession } from "./GameSession";
-
-const WORLD_WIDTH = 1_600;
-const WORLD_HEIGHT = 900;
+import { STAGE_STATION_INDEX, STATIONS } from "./presentationContract";
+import {
+  GRID_COLUMNS,
+  GRID_ROWS,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+  counterToWorld,
+  gridToWorld,
+  laneWorldDelta,
+  supplyToWorld,
+} from "./visualLayout";
 
 const COLORS = {
-  void: 0x090807,
-  soot: 0x17130f,
-  gold: 0xb77b24,
-  hotGold: 0xf2bd4b,
-  whiteGold: 0xffe8a6,
-  cyan: 0x45e3df,
-  frost: 0xc5ffff,
-  plum: 0x44243d,
-  alarm: 0xe44f39,
-  accepted: 0xaadf7a,
+  void: 0x132126,
+  gold: 0xa85f2b,
+  hotGold: 0xd9943b,
+  whiteGold: 0xf7e8c7,
+  cyan: 0x35bfc6,
+  frost: 0xd9fffb,
+  plum: 0x654459,
+  alarm: 0xdf4c3e,
+  accepted: 0x72b875,
+  laneA: 0x2b7f9a,
+  laneB: 0xa44a3f,
+  floor: 0xe8e4d6,
+  floorShade: 0xd5ddcf,
 };
 
 const PROVENANCE_COLORS: Record<Provenance, number> = {
@@ -64,29 +71,33 @@ const POSE_FRAME: Record<ActorPose, number> = {
   spray: 2,
 };
 
-const STATION_LABELS = ["SUBMIT", "PREP", "PULSE", "COUPLE", "READOUT"] as const;
-const STAGE_STATION: Record<JobStage, number> = {
-  accept: 4,
-  prepare: 1,
-  load: 2,
-  "couple-install": 3,
-  "couple-arm": 3,
-  canister: 4,
-  run: 4,
-  submission: 0,
-  reset: 4,
+const ITEM_TEXTURES: Record<Exclude<ItemKind, "cryo-lance">, string> = {
+  "pulse-H": "item-pulse-H-v3",
+  "pulse-X": "item-pulse-X-v3",
+  "pulse-P": "item-pulse-P-v3",
+  "coupling-half": "item-coupling-half-v3",
+  "empty-canister": "item-empty-canister-v3",
+  "result-canister": "item-result-canister-v3",
+  "coolant-cell": "item-coolant-cell-v3",
 };
 
 type TextPair = Record<LaneId, Phaser.GameObjects.Text[]>;
+type ImagePair = Record<LaneId, Phaser.GameObjects.Image[]>;
+type SupplyCueState = "inactive" | "active" | "empty";
 
 export class UndercooledScene extends Phaser.Scene {
   private readonly session: GameSession;
-  private heatGhost!: Phaser.GameObjects.Image;
   private staticLayer!: Phaser.GameObjects.Graphics;
   private stateLayer!: Phaser.GameObjects.Graphics;
   private laneBVeil!: Phaser.GameObjects.Rectangle;
   private laneBVeilText!: Phaser.GameObjects.Text;
   private stationTexts!: TextPair;
+  private stationProps!: ImagePair;
+  private pulseSupplySprites!: Record<LaneId, Record<PulseKind, Phaser.GameObjects.Image>>;
+  private auxSupplySprites!: Record<LaneId, Phaser.GameObjects.Image>;
+  private readonly itemSprites = new Map<string, Phaser.GameObjects.Image>();
+  private lanceRackSprites!: Record<LaneId, Phaser.GameObjects.Image>;
+  private lanceItemSprites!: Record<LaneId, Phaser.GameObjects.Image>;
   private actors!: Record<LaneId, Phaser.GameObjects.Image>;
   private shadows!: Record<LaneId, Phaser.GameObjects.Ellipse>;
   private renderedState: GameState | null = null;
@@ -103,15 +114,22 @@ export class UndercooledScene extends Phaser.Scene {
     const baseUrl = (import.meta as ImportMeta & { env: { BASE_URL: string } }).env.BASE_URL;
     this.load.setBaseURL(baseUrl);
     this.load.image(
-      "undercooled-workshop-v2",
-      "assets/environment/undercooled-central-workshop-v2.png",
+      "undercooled-workshop-v3",
+      "assets/environment/undercooled-workshop-shell-v3.png",
     );
+    for (const station of STATIONS) {
+      this.load.image(`station-${station.kind}-v3`, `assets/stations-v3/${station.kind}.png`);
+    }
+    for (const [kind, texture] of Object.entries(ITEM_TEXTURES)) {
+      this.load.image(texture, `assets/items-v3/${kind.toLowerCase()}.png`);
+    }
+    this.load.image("cryo-lance-v3", "assets/tools-v3/cryo-lance.png");
     for (const laneId of LANE_IDS) {
       const worker = laneId === "A" ? "worker-a" : "worker-b";
       for (let frame = 1; frame <= 5; frame += 1) {
         this.load.image(
           `${worker}-${frame}`,
-          `assets/characters/${worker}-frames/${String(frame).padStart(2, "0")}.png`,
+          `assets/characters-v4/${worker}-frames/${String(frame).padStart(2, "0")}.png`,
         );
       }
     }
@@ -121,21 +139,17 @@ export class UndercooledScene extends Phaser.Scene {
     this.cameras.main.setBackgroundColor(COLORS.void);
     this.cameras.main.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     this.add
-      .image(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, "undercooled-workshop-v2")
+      .image(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, "undercooled-workshop-v3")
       .setDisplaySize(WORLD_WIDTH, WORLD_HEIGHT)
       .setDepth(0);
-    this.heatGhost = this.add
-      .image(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, "undercooled-workshop-v2")
-      .setDisplaySize(WORLD_WIDTH, WORLD_HEIGHT)
-      .setTint(COLORS.hotGold)
-      .setBlendMode(Phaser.BlendModes.ADD)
-      .setAlpha(0)
-      .setDepth(1);
 
     this.staticLayer = this.add.graphics().setDepth(8);
-    this.stateLayer = this.add.graphics().setDepth(95);
+    this.stateLayer = this.add.graphics().setDepth(100);
+    this.createStationProps();
     this.stationTexts = { A: [], B: [] };
     this.createStationText();
+    this.createSupplySprites();
+    this.createLanceSprites();
 
     this.laneBVeil = this.add
       .rectangle(1_220, 566, 758, 650, COLORS.void, 0.94)
@@ -200,16 +214,19 @@ export class UndercooledScene extends Phaser.Scene {
 
   private createStationText(): void {
     for (const laneId of LANE_IDS) {
-      this.stationTexts[laneId] = STATION_LABELS.map((label, index) => {
-        const point = counterToWorld(laneId, index);
+      const laneColor = laneId === "A" ? "#2b7f9a" : "#a44a3f";
+      this.stationTexts[laneId] = STATIONS.map((station) => {
+        const point = counterToWorld(laneId, station.localX);
         return this.add
-          .text(point.x, point.y - 7, label, {
+          .text(point.x, point.y + 8, station.label, {
             fontFamily: "Arial Black, Arial, sans-serif",
-            fontSize: "14px",
-            color: "#b77b24",
-            stroke: "#090807",
-            strokeThickness: 5,
+            fontSize: "13px",
+            color: "#fff7e4",
+            backgroundColor: laneColor,
+            stroke: laneColor,
+            strokeThickness: 2,
             align: "center",
+            padding: { x: 7, y: 3 },
           })
           .setOrigin(0.5)
           .setDepth(14);
@@ -226,9 +243,9 @@ export class UndercooledScene extends Phaser.Scene {
           .text(point.x, point.y + 39, label, {
             fontFamily: "Arial Black, Arial, sans-serif",
             fontSize: "13px",
-            color: label === "H" ? "#45e3df" : label === "X" ? "#f2bd4b" : "#ffe8a6",
-            stroke: "#090807",
-            strokeThickness: 5,
+            color: label === "H" ? "#167f8d" : label === "X" ? "#b0602c" : "#5a4530",
+            stroke: "#fff7e4",
+            strokeThickness: 4,
           })
           .setOrigin(0.5)
           .setDepth(14);
@@ -238,13 +255,78 @@ export class UndercooledScene extends Phaser.Scene {
         .text(rack.x + (laneId === "A" ? 35 : -35), rack.y + 69, "LANCE", {
           fontFamily: "Arial Black, Arial, sans-serif",
           fontSize: "11px",
-          color: "#c5ffff",
-          stroke: "#090807",
-          strokeThickness: 5,
+          color: "#167f8d",
+          stroke: "#fff7e4",
+          strokeThickness: 4,
         })
         .setOrigin(0.5)
         .setDepth(14);
     }
+  }
+
+  private createStationProps(): void {
+    this.stationProps = { A: [], B: [] };
+    for (const laneId of LANE_IDS) {
+      this.stationProps[laneId] = STATIONS.map((station) => {
+        const point = counterToWorld(laneId, station.localX);
+        return this.add
+          .image(point.x, point.y - 72, `station-${station.kind}-v3`)
+          .setOrigin(0.5)
+          .setScale(0.42)
+          .setFlipX(laneId === "B")
+          .setDepth(12);
+      });
+    }
+  }
+
+  private createLanceSprites(): void {
+    this.lanceRackSprites = { A: this.createLanceSprite(), B: this.createLanceSprite() };
+    this.lanceItemSprites = { A: this.createLanceSprite(), B: this.createLanceSprite() };
+
+    for (const laneId of LANE_IDS) {
+      const rack = gridToWorld(laneId, LANCE_RACK_POSITION);
+      this.lanceRackSprites[laneId]
+        .setPosition(rack.x + (laneId === "A" ? 32 : -32), rack.y + 42)
+        .setDisplaySize(76, 76)
+        .setFlipX(laneId === "A")
+        .setDepth(13);
+      this.lanceItemSprites[laneId].setVisible(false).setDepth(101);
+    }
+  }
+
+  private createLanceSprite(): Phaser.GameObjects.Image {
+    return this.add.image(0, 0, "cryo-lance-v3").setOrigin(0.5);
+  }
+
+  private createSupplySprites(): void {
+    this.pulseSupplySprites = {
+      A: this.createPulseSupplySet("A"),
+      B: this.createPulseSupplySet("B"),
+    };
+    this.auxSupplySprites = {
+      A: this.add.image(0, 0, ITEM_TEXTURES["coupling-half"]).setOrigin(0.5).setDepth(13),
+      B: this.add.image(0, 0, ITEM_TEXTURES["coupling-half"]).setOrigin(0.5).setDepth(13),
+    };
+    for (const laneId of LANE_IDS) {
+      const aux = supplyToWorld(laneId, SUPPLY_POSITIONS.AUX.y);
+      this.auxSupplySprites[laneId]
+        .setPosition(aux.x, aux.y)
+        .setDisplaySize(60, 60)
+        .setFlipX(laneId === "B");
+    }
+  }
+
+  private createPulseSupplySet(laneId: LaneId): Record<PulseKind, Phaser.GameObjects.Image> {
+    const create = (kind: PulseKind): Phaser.GameObjects.Image => {
+      const point = supplyToWorld(laneId, SUPPLY_POSITIONS[kind].y);
+      return this.add
+        .image(point.x, point.y, ITEM_TEXTURES[`pulse-${kind}`])
+        .setOrigin(0.5)
+        .setDisplaySize(60, 60)
+        .setFlipX(laneId === "B")
+        .setDepth(13);
+    };
+    return { H: create("H"), X: create("X"), P: create("P") };
   }
 
   private redrawStatic(state: GameState): void {
@@ -266,66 +348,65 @@ export class UndercooledScene extends Phaser.Scene {
   }
 
   private drawProcessorFrame(): void {
-    this.staticLayer.fillStyle(COLORS.void, 0.55);
-    this.staticLayer.fillRoundedRect(725, 399, 150, 75, 20);
-    this.staticLayer.lineStyle(4, COLORS.hotGold, 0.72);
-    this.staticLayer.strokeRoundedRect(725, 399, 150, 75, 20);
-    this.staticLayer.lineStyle(2, COLORS.cyan, 0.55);
-    this.staticLayer.strokeCircle(800, 437, 26);
-    this.staticLayer.lineBetween(616, 437, 725, 437);
-    this.staticLayer.lineBetween(875, 437, 984, 437);
+    this.staticLayer.fillStyle(COLORS.void, 0.88);
+    this.staticLayer.fillRoundedRect(742, 401, 116, 72, 18);
+    this.staticLayer.lineStyle(4, COLORS.hotGold, 0.92);
+    this.staticLayer.strokeRoundedRect(742, 401, 116, 72, 18);
+    this.staticLayer.lineStyle(3, COLORS.cyan, 0.72);
+    this.staticLayer.strokeCircle(800, 437, 24);
+    this.staticLayer.lineBetween(646, 437, 742, 437);
+    this.staticLayer.lineBetween(858, 437, 954, 437);
     for (const y of [481, 589, 697, 805]) {
-      this.staticLayer.lineStyle(3, COLORS.cyan, 0.2);
-      this.staticLayer.lineBetween(647, y, 690, y);
-      this.staticLayer.lineBetween(910, y, 953, y);
+      this.staticLayer.lineStyle(3, COLORS.cyan, 0.3);
+      this.staticLayer.lineBetween(654, y, 684, y);
+      this.staticLayer.lineBetween(916, y, 946, y);
     }
   }
 
   private drawLaneGrid(laneId: LaneId): void {
-    for (let y = 0; y <= 3; y += 1) {
-      for (let x = 0; x <= 4; x += 1) {
+    const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
+    for (let y = 0; y < GRID_ROWS; y += 1) {
+      for (let x = 0; x < GRID_COLUMNS; x += 1) {
         const point = gridToWorld(laneId, { x, y });
-        this.staticLayer.fillStyle(COLORS.void, 0.07);
-        this.staticLayer.fillRoundedRect(point.x - 47, point.y - 40, 94, 80, 7);
-        this.staticLayer.lineStyle(1.5, COLORS.gold, 0.25);
-        this.staticLayer.strokeRoundedRect(point.x - 47, point.y - 40, 94, 80, 7);
+        this.staticLayer.fillStyle(y % 2 === 0 ? COLORS.floor : COLORS.floorShade, 0.82);
+        this.staticLayer.fillRoundedRect(point.x - 48, point.y - 41, 96, 82, 8);
+        this.staticLayer.lineStyle(2, laneColor, 0.34);
+        this.staticLayer.strokeRoundedRect(point.x - 48, point.y - 41, 96, 82, 8);
       }
     }
     const outer = gridToWorld(laneId, { x: 0, y: 0 });
     const inner = gridToWorld(laneId, { x: 4, y: 0 });
-    this.staticLayer.lineStyle(4, COLORS.gold, 0.42);
+    this.staticLayer.lineStyle(5, laneColor, 0.72);
     this.staticLayer.lineBetween(outer.x, 392, inner.x, 392);
   }
 
   private drawCounterStations(laneId: LaneId): void {
-    for (let index = 0; index < STATION_LABELS.length; index += 1) {
-      const counter = counterToWorld(laneId, index);
-      const floor = gridToWorld(laneId, { x: index, y: 0 });
-      this.staticLayer.fillStyle(COLORS.void, 0.84);
-      this.staticLayer.fillRoundedRect(counter.x - 49, counter.y - 22, 98, 38, 7);
-      this.staticLayer.lineStyle(2, COLORS.gold, 0.76);
-      this.staticLayer.strokeRoundedRect(counter.x - 49, counter.y - 22, 98, 38, 7);
-      this.staticLayer.lineStyle(3, index === 4 ? COLORS.cyan : COLORS.hotGold, 0.62);
-      this.staticLayer.strokeCircle(counter.x, counter.y + 34, 17);
-      this.staticLayer.lineStyle(2, COLORS.gold, 0.4);
-      this.staticLayer.lineBetween(counter.x, counter.y + 51, floor.x, floor.y - 43);
+    const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
+    for (const station of STATIONS) {
+      const counter = counterToWorld(laneId, station.localX);
+      const floor = gridToWorld(laneId, { x: station.localX, y: 0 });
+      this.staticLayer.lineStyle(3, laneColor, 0.65);
+      this.staticLayer.lineBetween(counter.x, counter.y + 25, floor.x, floor.y - 44);
     }
   }
 
   private drawBuffers(laneId: LaneId): void {
+    const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
     for (const position of [PULSE_BUFFER_POSITION, COUPLE_BUFFER_POSITION, READOUT_BUFFER_POSITION]) {
       const point = gridToWorld(laneId, position);
-      this.staticLayer.fillStyle(COLORS.void, 0.48);
+      this.staticLayer.fillStyle(COLORS.cyan, 0.13);
       this.staticLayer.fillRoundedRect(point.x - 39, point.y - 26, 78, 52, 9);
-      this.staticLayer.lineStyle(3, COLORS.whiteGold, 0.42);
+      this.staticLayer.lineStyle(3, laneColor, 0.7);
       this.staticLayer.strokeRoundedRect(point.x - 39, point.y - 26, 78, 52, 9);
-      this.staticLayer.lineStyle(2, COLORS.gold, 0.48);
-      this.staticLayer.lineBetween(point.x - 28, point.y, point.x + 28, point.y);
-      this.staticLayer.lineBetween(point.x, point.y - 16, point.x, point.y + 16);
+      this.staticLayer.lineStyle(3, COLORS.cyan, 0.68);
+      for (const offset of [-22, 0, 22]) {
+        this.staticLayer.lineBetween(point.x + offset - 8, point.y + 13, point.x + offset + 8, point.y - 13);
+      }
     }
   }
 
   private drawSupplies(laneId: LaneId): void {
+    const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
     const supplies = [
       { pulse: "H", position: SUPPLY_POSITIONS.H, color: COLORS.cyan },
       { pulse: "X", position: SUPPLY_POSITIONS.X, color: COLORS.hotGold },
@@ -335,42 +416,54 @@ export class UndercooledScene extends Phaser.Scene {
 
     for (const supply of supplies) {
       const point = supplyToWorld(laneId, supply.position.y);
-      this.staticLayer.fillStyle(COLORS.void, 0.88);
-      this.staticLayer.fillRoundedRect(point.x - 39, point.y - 30, 78, 60, 9);
-      this.staticLayer.lineStyle(3, supply.color, 0.86);
-      this.staticLayer.strokeRoundedRect(point.x - 39, point.y - 30, 78, 60, 9);
-      if (supply.pulse === "AUX") {
-        this.drawAuxGlyph(this.staticLayer, point.x, point.y, 0.82, supply.color);
-      } else {
-        this.drawPulseGlyph(this.staticLayer, supply.pulse, point.x, point.y, 1, supply.color);
-      }
+      this.staticLayer.fillStyle(COLORS.whiteGold, 0.97);
+      this.staticLayer.fillRoundedRect(point.x - 39, point.y - 31, 78, 62, 11);
+      this.staticLayer.lineStyle(4, laneColor, 0.88);
+      this.staticLayer.strokeRoundedRect(point.x - 39, point.y - 31, 78, 62, 11);
+      this.staticLayer.lineStyle(2, supply.color, 0.75);
+      this.staticLayer.lineBetween(point.x - 29, point.y + 23, point.x + 29, point.y + 23);
     }
 
     const rack = gridToWorld(laneId, LANCE_RACK_POSITION);
-    const lanceX = rack.x + (laneId === "A" ? 35 : -35);
-    this.staticLayer.fillStyle(COLORS.void, 0.74);
-    this.staticLayer.fillRoundedRect(lanceX - 26, rack.y + 31, 52, 30, 8);
-    this.staticLayer.lineStyle(3, COLORS.cyan, 0.9);
-    this.staticLayer.strokeRoundedRect(lanceX - 26, rack.y + 31, 52, 30, 8);
-    this.drawLanceGlyph(this.staticLayer, lanceX, rack.y + 46, 0.85, COLORS.frost);
+    const lanceX = rack.x + (laneId === "A" ? 32 : -32);
+    this.staticLayer.fillStyle(COLORS.whiteGold, 0.96);
+    this.staticLayer.fillRoundedRect(lanceX - 34, rack.y + 8, 68, 69, 12);
+    this.staticLayer.lineStyle(4, laneColor, 0.86);
+    this.staticLayer.strokeRoundedRect(lanceX - 34, rack.y + 8, 68, 69, 12);
   }
 
   private drawCoolingFixtures(laneId: LaneId): void {
     const reservoir = gridToWorld(laneId, RESERVOIR_POSITION);
     const pump = gridToWorld(laneId, PUMP_POSITION);
-    this.staticLayer.fillStyle(COLORS.void, 0.7);
-    this.staticLayer.fillCircle(reservoir.x, reservoir.y, 34);
-    this.staticLayer.lineStyle(4, COLORS.cyan, 0.72);
-    this.staticLayer.strokeCircle(reservoir.x, reservoir.y, 34);
-    this.staticLayer.lineStyle(2, COLORS.frost, 0.58);
-    this.staticLayer.strokeCircle(reservoir.x, reservoir.y, 19);
+    const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
 
-    this.staticLayer.fillStyle(COLORS.void, 0.7);
-    this.staticLayer.fillRoundedRect(pump.x - 34, pump.y - 29, 68, 58, 11);
-    this.staticLayer.lineStyle(4, COLORS.cyan, 0.7);
-    this.staticLayer.strokeRoundedRect(pump.x - 34, pump.y - 29, 68, 58, 11);
-    this.staticLayer.lineStyle(3, COLORS.frost, 0.5);
-    this.staticLayer.strokeCircle(pump.x, pump.y, 13);
+    this.staticLayer.fillStyle(COLORS.whiteGold, 0.96);
+    this.staticLayer.fillRoundedRect(reservoir.x - 38, reservoir.y - 35, 76, 70, 18);
+    this.staticLayer.lineStyle(4, laneColor, 0.82);
+    this.staticLayer.strokeRoundedRect(reservoir.x - 38, reservoir.y - 35, 76, 70, 18);
+    this.staticLayer.fillStyle(COLORS.cyan, 0.25);
+    this.staticLayer.fillCircle(reservoir.x, reservoir.y, 25);
+    this.staticLayer.lineStyle(4, COLORS.cyan, 0.86);
+    this.staticLayer.strokeCircle(reservoir.x, reservoir.y, 25);
+    this.staticLayer.lineStyle(2, COLORS.frost, 0.8);
+    this.staticLayer.strokeCircle(reservoir.x, reservoir.y, 14);
+
+    this.staticLayer.fillStyle(COLORS.whiteGold, 0.96);
+    this.staticLayer.fillRoundedRect(pump.x - 37, pump.y - 33, 74, 66, 13);
+    this.staticLayer.lineStyle(4, laneColor, 0.82);
+    this.staticLayer.strokeRoundedRect(pump.x - 37, pump.y - 33, 74, 66, 13);
+    this.staticLayer.fillStyle(COLORS.void, 0.88);
+    this.staticLayer.fillCircle(pump.x, pump.y, 19);
+    this.staticLayer.lineStyle(4, COLORS.cyan, 0.82);
+    this.staticLayer.strokeCircle(pump.x, pump.y, 19);
+    for (const angle of [0, Math.PI / 2, Math.PI, (Math.PI * 3) / 2]) {
+      this.staticLayer.lineBetween(
+        pump.x + Math.cos(angle) * 5,
+        pump.y + Math.sin(angle) * 5,
+        pump.x + Math.cos(angle) * 15,
+        pump.y + Math.sin(angle) * 15,
+      );
+    }
   }
 
   private drawSafeStops(laneId: LaneId): void {
@@ -378,9 +471,9 @@ export class UndercooledScene extends Phaser.Scene {
       const point = gridToWorld(laneId, { x: localX, y: 0 });
       const side = localX === 0 ? (laneId === "A" ? -1 : 1) : laneId === "A" ? 1 : -1;
       const railX = point.x + side * 48;
-      this.staticLayer.fillStyle(COLORS.gold, 0.9);
+      this.staticLayer.fillStyle(laneId === "A" ? COLORS.laneA : COLORS.laneB, 0.9);
       this.staticLayer.fillRoundedRect(railX - 7, point.y - 42, 14, 84, 5);
-      this.staticLayer.lineStyle(2, COLORS.void, 0.85);
+      this.staticLayer.lineStyle(2, COLORS.whiteGold, 0.85);
       for (let y = point.y - 33; y <= point.y + 27; y += 15) {
         this.staticLayer.lineBetween(railX - 5, y, railX + 5, y + 10);
       }
@@ -388,30 +481,68 @@ export class UndercooledScene extends Phaser.Scene {
   }
 
   private drawRiskAddresses(state: GameState, laneId: LaneId): void {
+    const protectedLane = state.level.jointProfile === "protected" && laneId === "A";
     if (state.level.features.interactionRisk) {
       for (const position of [PULSE_POSITION, COUPLE_POSITION, READOUT_POSITION]) {
         const point = gridToWorld(laneId, position);
-        this.staticLayer.lineStyle(4, COLORS.hotGold, 0.82);
-        this.staticLayer.strokeRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
-        this.staticLayer.lineStyle(2, COLORS.whiteGold, 0.5);
-        this.staticLayer.strokeCircle(point.x, point.y, 12);
+        const color = protectedLane ? COLORS.accepted : COLORS.hotGold;
+        this.staticLayer.fillStyle(color, protectedLane ? 0.08 : 0.16);
+        this.staticLayer.fillRoundedRect(point.x - 44, point.y - 37, 88, 74, 10);
+        this.staticLayer.lineStyle(protectedLane ? 3 : 5, color, protectedLane ? 0.62 : 0.92);
+        for (const [cornerX, cornerY, directionX, directionY] of [
+          [-40, -33, 1, 1],
+          [40, -33, -1, 1],
+          [-40, 33, 1, -1],
+          [40, 33, -1, -1],
+        ] as const) {
+          this.staticLayer.lineBetween(point.x + cornerX, point.y + cornerY, point.x + cornerX + directionX * 15, point.y + cornerY);
+          this.staticLayer.lineBetween(point.x + cornerX, point.y + cornerY, point.x + cornerX, point.y + cornerY + directionY * 15);
+        }
+        if (protectedLane) {
+          this.drawProtectedAddressGlyph(point.x, point.y);
+        } else {
+          this.staticLayer.lineStyle(3, COLORS.gold, 0.82);
+          this.staticLayer.strokeCircle(point.x, point.y, 10);
+          this.staticLayer.lineBetween(point.x - 5, point.y - 5, point.x + 5, point.y + 5);
+          this.staticLayer.lineBetween(point.x + 5, point.y - 5, point.x - 5, point.y + 5);
+        }
       }
     }
     if (state.level.features.movementRisk) {
       const point = gridToWorld(laneId, MOVEMENT_RISK_POSITION);
-      this.staticLayer.fillStyle(COLORS.cyan, 0.08);
+      const color = protectedLane ? COLORS.accepted : COLORS.cyan;
+      this.staticLayer.fillStyle(color, protectedLane ? 0.08 : 0.17);
       this.staticLayer.fillRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
-      this.staticLayer.lineStyle(4, COLORS.cyan, 0.9);
+      this.staticLayer.lineStyle(protectedLane ? 3 : 5, color, protectedLane ? 0.62 : 0.9);
       this.staticLayer.strokeRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
-      for (let offset = -22; offset <= 22; offset += 22) {
-        this.staticLayer.lineStyle(3, COLORS.frost, 0.62);
-        this.staticLayer.beginPath();
-        this.staticLayer.moveTo(point.x + offset - 9, point.y + 8);
-        this.staticLayer.lineTo(point.x + offset, point.y - 8);
-        this.staticLayer.lineTo(point.x + offset + 9, point.y + 8);
-        this.staticLayer.strokePath();
+      if (protectedLane) {
+        this.drawProtectedAddressGlyph(point.x, point.y);
+      } else {
+        for (let offset = -22; offset <= 22; offset += 22) {
+          this.staticLayer.lineStyle(3, COLORS.frost, 0.72);
+          this.staticLayer.beginPath();
+          this.staticLayer.moveTo(point.x + offset - 9, point.y + 8);
+          this.staticLayer.lineTo(point.x + offset, point.y - 8);
+          this.staticLayer.lineTo(point.x + offset + 9, point.y + 8);
+          this.staticLayer.strokePath();
+        }
       }
     }
+  }
+
+  private drawProtectedAddressGlyph(x: number, y: number): void {
+    this.staticLayer.lineStyle(3, COLORS.frost, 0.86);
+    this.staticLayer.beginPath();
+    this.staticLayer.moveTo(x, y - 15);
+    this.staticLayer.lineTo(x + 13, y - 9);
+    this.staticLayer.lineTo(x + 10, y + 8);
+    this.staticLayer.lineTo(x, y + 16);
+    this.staticLayer.lineTo(x - 10, y + 8);
+    this.staticLayer.lineTo(x - 13, y - 9);
+    this.staticLayer.closePath();
+    this.staticLayer.strokePath();
+    this.staticLayer.lineBetween(x - 6, y, x - 1, y + 6);
+    this.staticLayer.lineBetween(x - 1, y + 6, x + 8, y - 6);
   }
 
   private snapActors(state: GameState): void {
@@ -433,7 +564,11 @@ export class UndercooledScene extends Phaser.Scene {
       image.y = Phaser.Math.Linear(image.y || point.y, point.y, smoothing);
       image
         .setScale(point.scale)
-        .setFlipX(actorState.facing === "out")
+        .setFlipX(
+          laneId === "A"
+            ? actorState.facing === "out"
+            : actorState.facing !== "out",
+        )
         .setDepth(70 + point.y / 30)
         .setTexture(`${laneId === "A" ? "worker-a" : "worker-b"}-${POSE_FRAME[actorState.pose]}`);
       shadow.x = image.x;
@@ -457,38 +592,158 @@ export class UndercooledScene extends Phaser.Scene {
       0,
       1,
     );
-    this.heatGhost.setTint(state.cooling.alarmed ? COLORS.alarm : COLORS.hotGold);
-    this.heatGhost.alpha = Math.max(0, (heatRatio - 0.35) * 0.25);
-    this.heatGhost.x = WORLD_WIDTH / 2 + Math.sin(state.simTimeMs / 170) * heatRatio * 7;
-    this.heatGhost.y = WORLD_HEIGHT / 2 + Math.cos(state.simTimeMs / 230) * heatRatio * 1.5;
     this.cameras.main.setZoom(
       heatRatio > 0.86 && state.phase === "running"
-        ? 1 + Math.sin(state.simTimeMs / 120) * 0.0018
+        ? 1 + Math.sin(state.simTimeMs / 120) * 0.0012
         : 1,
     );
 
     this.syncStationText(state);
+    this.syncSupplySprites(state);
     this.drawDynamicState(state);
   }
 
   private syncStationText(state: GameState): void {
-    const activeStation = STAGE_STATION[state.currentJob.stage];
+    const activeStation = STAGE_STATION_INDEX[state.currentJob.stage];
     for (const laneId of LANE_IDS) {
       for (let index = 0; index < this.stationTexts[laneId].length; index += 1) {
         const active = index === activeStation;
-        let label: string = STATION_LABELS[index];
-        if (index === 4 && state.currentJob.stage === "accept") label = "ACCEPT";
-        if (index === 4 && state.currentJob.stage === "reset") label = "RESET";
         this.stationTexts[laneId][index]
-          .setText(label)
-          .setColor(active ? "#ffe8a6" : "#b77b24")
-          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.75);
+          .setText(STATIONS[index].label)
+          .setColor(active ? "#ffffff" : "#f7e8c7")
+          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.82)
+          .setScale(active ? 1.07 : 1);
+        this.stationProps[laneId][index]
+          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.9)
+          .setScale(active ? 0.45 : 0.42);
       }
     }
   }
 
+  private syncSupplySprites(state: GameState): void {
+    const pulse = 0.5 + (Math.sin(state.simTimeMs / 150) + 1) * 0.5;
+    for (const laneId of LANE_IDS) {
+      const visible = laneId !== "B" || state.laneBRevealed;
+      for (const pulseKind of ["H", "X", "P"] as const) {
+        const cue = this.pulseSupplyCue(state, laneId, pulseKind);
+        const sprite = this.pulseSupplySprites[laneId][pulseKind];
+        sprite
+          .setVisible(visible && cue !== "empty")
+          .setAlpha(cue === "active" ? 0.9 + pulse * 0.1 : 0.16)
+          .setDisplaySize(
+            cue === "active" ? 64 + pulse * 5 : 52,
+            cue === "active" ? 64 + pulse * 5 : 52,
+          );
+        if (cue === "active") sprite.clearTint();
+        else sprite.setTint(0x706a5f);
+      }
+      const auxKind = this.auxSupplyKind(state, laneId);
+      const auxCue = this.auxSupplyCue(state, laneId, auxKind);
+      const auxSprite = this.auxSupplySprites[laneId];
+      auxSprite
+        .setVisible(visible && auxCue !== "empty")
+        .setTexture(auxKind === null ? ITEM_TEXTURES["coupling-half"] : ITEM_TEXTURES[auxKind])
+        .setAlpha(auxCue === "active" ? 0.9 + pulse * 0.1 : 0.12)
+        .setDisplaySize(
+          auxCue === "active" ? 64 + pulse * 5 : 52,
+          auxCue === "active" ? 64 + pulse * 5 : 52,
+        );
+      if (auxCue === "active") auxSprite.clearTint();
+      else auxSprite.setTint(0x706a5f);
+    }
+  }
+
+  private pulseSupplyCue(
+    state: GameState,
+    laneId: LaneId,
+    pulse: PulseKind,
+  ): SupplyCueState {
+    const replacement = state.lanes[laneId].replacementKind;
+    const replacementPulse: PulseKind | null =
+      replacement === "pulse-H"
+        ? "H"
+        : replacement === "pulse-X"
+          ? "X"
+          : replacement === "pulse-P"
+            ? "P"
+            : null;
+    const required = replacementPulse ?? (
+      state.currentJob.stage === "load"
+        ? state.currentJob.definition.pulses[laneId][state.lanes[laneId].job.loadedPulses.length]
+        : null
+    );
+    if (required !== pulse) return "inactive";
+    return this.hasPendingSupplyItem(
+      state,
+      laneId,
+      `pulse-${pulse}`,
+      state.currentJob.definition.id,
+    )
+      ? "empty"
+      : "active";
+  }
+
+  private auxSupplyCue(
+    state: GameState,
+    laneId: LaneId,
+    kind: "coupling-half" | "empty-canister" | "coolant-cell" | null,
+  ): SupplyCueState {
+    if (kind === null) return "inactive";
+    return this.hasPendingSupplyItem(
+      state,
+      laneId,
+      kind,
+      kind === "coolant-cell" ? null : state.currentJob.definition.id,
+    )
+      ? "empty"
+      : "active";
+  }
+
+  private hasPendingSupplyItem(
+    state: GameState,
+    laneId: LaneId,
+    kind: ItemKind,
+    jobId: string | null,
+  ): boolean {
+    return Object.values(state.items).some(
+      (item) =>
+        item.lane === laneId &&
+        item.kind === kind &&
+        item.jobId === jobId &&
+        item.location.kind !== "discarded" &&
+        item.location.kind !== "installed",
+    );
+  }
+
+  private auxSupplyKind(
+    state: GameState,
+    laneId: LaneId,
+  ): "coupling-half" | "empty-canister" | "coolant-cell" | null {
+    const replacement = state.lanes[laneId].replacementKind;
+    if (
+      replacement === "coupling-half" ||
+      replacement === "empty-canister" ||
+      replacement === "coolant-cell"
+    ) {
+      return replacement;
+    }
+    if (state.currentJob.stage === "couple-install" && !state.lanes[laneId].job.couplingInstalled) {
+      return "coupling-half";
+    }
+    if (
+      state.currentJob.stage === "canister" &&
+      laneId === state.currentJob.definition.courierLane &&
+      !state.currentJob.canisterAttached
+    ) {
+      return "empty-canister";
+    }
+    if (state.cooling.reservoir[laneId] < 65) return "coolant-cell";
+    return null;
+  }
+
   private drawDynamicState(state: GameState): void {
     this.stateLayer.clear();
+    this.drawSupplyCues(state);
     this.drawStageHighlight(state);
     for (const laneId of LANE_IDS) {
       if (laneId === "B" && !state.laneBRevealed) continue;
@@ -496,20 +751,70 @@ export class UndercooledScene extends Phaser.Scene {
       this.drawCoolingState(state, laneId);
     }
     this.drawItems(state);
+    this.syncLanceSprites(state);
     this.drawProcessorState(state);
     this.drawThermalAlarm(state);
   }
 
+  private drawSupplyCues(state: GameState): void {
+    for (const laneId of LANE_IDS) {
+      if (laneId === "B" && !state.laneBRevealed) continue;
+      for (const pulse of ["H", "X", "P"] as const) {
+        const cue = this.pulseSupplyCue(state, laneId, pulse);
+        if (cue === "inactive") continue;
+        const point = supplyToWorld(laneId, SUPPLY_POSITIONS[pulse].y);
+        this.drawSupplyCueMarker(state, laneId, point.x, point.y, cue);
+      }
+      const auxKind = this.auxSupplyKind(state, laneId);
+      const auxCue = this.auxSupplyCue(state, laneId, auxKind);
+      if (auxCue !== "inactive") {
+        const point = supplyToWorld(laneId, SUPPLY_POSITIONS.AUX.y);
+        this.drawSupplyCueMarker(state, laneId, point.x, point.y, auxCue);
+      }
+    }
+  }
+
+  private drawSupplyCueMarker(
+    state: GameState,
+    laneId: LaneId,
+    x: number,
+    y: number,
+    cue: Exclude<SupplyCueState, "inactive">,
+  ): void {
+    if (cue === "empty") {
+      this.stateLayer.fillStyle(COLORS.void, 0.72);
+      this.stateLayer.fillCircle(x, y, 25);
+      this.stateLayer.lineStyle(3, COLORS.whiteGold, 0.46);
+      this.stateLayer.strokeCircle(x, y, 25);
+      for (const offset of [-12, 0, 12]) {
+        this.stateLayer.lineBetween(x + offset - 7, y + 9, x + offset + 7, y - 9);
+      }
+      return;
+    }
+
+    const pulse = 0.62 + (Math.sin(state.simTimeMs / 145) + 1) * 0.17;
+    const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
+    this.stateLayer.fillStyle(COLORS.whiteGold, 0.12 + pulse * 0.08);
+    this.stateLayer.fillRoundedRect(x - 44, y - 36, 88, 72, 13);
+    this.stateLayer.lineStyle(6, COLORS.whiteGold, pulse);
+    this.stateLayer.strokeRoundedRect(x - 44, y - 36, 88, 72, 13);
+    this.stateLayer.lineStyle(3, laneColor, 0.92);
+    this.stateLayer.strokeRoundedRect(x - 38, y - 30, 76, 60, 10);
+    this.stateLayer.fillStyle(COLORS.whiteGold, pulse);
+    this.stateLayer.fillTriangle(x - 13, y - 51, x + 13, y - 51, x, y - 38);
+  }
+
   private drawStageHighlight(state: GameState): void {
-    const station = STAGE_STATION[state.currentJob.stage];
+    const station = STAGE_STATION_INDEX[state.currentJob.stage];
     const pulse = 0.65 + Math.sin(state.simTimeMs / 180) * 0.24;
     for (const laneId of LANE_IDS) {
       if (laneId === "B" && !state.laneBRevealed) continue;
       const counter = counterToWorld(laneId, station);
       const floor = gridToWorld(laneId, { x: station, y: 0 });
+      const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
       this.stateLayer.lineStyle(5, COLORS.whiteGold, pulse);
-      this.stateLayer.strokeRoundedRect(counter.x - 54, counter.y - 27, 108, 48, 9);
-      this.stateLayer.lineStyle(4, COLORS.hotGold, pulse * 0.82);
+      this.stateLayer.strokeRoundedRect(counter.x - 47, counter.y - 112, 94, 80, 13);
+      this.stateLayer.lineStyle(4, laneColor, pulse * 0.9);
       this.stateLayer.strokeRoundedRect(floor.x - 49, floor.y - 42, 98, 84, 10);
     }
   }
@@ -517,7 +822,6 @@ export class UndercooledScene extends Phaser.Scene {
   private drawLaneJobState(state: GameState, laneId: LaneId): void {
     const lane = state.lanes[laneId];
     const prep = counterToWorld(laneId, PREP_POSITION.x);
-    const pulse = counterToWorld(laneId, PULSE_POSITION.x);
     const couple = counterToWorld(laneId, COUPLE_POSITION.x);
     const readout = counterToWorld(laneId, READOUT_POSITION.x);
 
@@ -529,33 +833,18 @@ export class UndercooledScene extends Phaser.Scene {
             0,
             1,
           );
-      this.drawProgressArc(prep.x, prep.y + 34, 24, progress, lane.job.prepared ? COLORS.accepted : COLORS.cyan);
+      this.drawProgressArc(prep.x, prep.y - 72, 34, progress, lane.job.prepared ? COLORS.accepted : COLORS.cyan);
     }
 
-    lane.job.loadedPulses.forEach((kind, index) => {
-      const direction = laneId === "A" ? 1 : -1;
-      this.drawPulseGlyph(
-        this.stateLayer,
-        kind,
-        pulse.x + direction * (index - (lane.job.loadedPulses.length - 1) / 2) * 21,
-        pulse.y + 34,
-        0.52,
-        kind === "H" ? COLORS.cyan : kind === "X" ? COLORS.hotGold : COLORS.whiteGold,
-      );
-    });
-
-    if (lane.job.couplingInstalled) {
-      this.drawCouplingGlyph(this.stateLayer, couple.x, couple.y + 34, 0.72, COLORS.whiteGold, laneId);
-    }
     if (lane.job.couplingArmedAtMs !== null) {
       this.stateLayer.lineStyle(4, COLORS.accepted, 0.9);
-      this.stateLayer.strokeCircle(couple.x, couple.y + 34, 25);
+      this.stateLayer.strokeCircle(couple.x, couple.y - 72, 25);
     }
     if (lane.job.resetArmed) {
       this.stateLayer.lineStyle(5, COLORS.cyan, 0.92);
-      this.stateLayer.strokeCircle(readout.x, readout.y + 34, 26);
-      this.stateLayer.lineBetween(readout.x - 11, readout.y + 34, readout.x, readout.y + 44);
-      this.stateLayer.lineBetween(readout.x, readout.y + 44, readout.x + 15, readout.y + 25);
+      this.stateLayer.strokeCircle(readout.x, readout.y - 72, 26);
+      this.stateLayer.lineBetween(readout.x - 11, readout.y - 72, readout.x, readout.y - 62);
+      this.stateLayer.lineBetween(readout.x, readout.y - 62, readout.x + 15, readout.y - 81);
     }
   }
 
@@ -642,25 +931,36 @@ export class UndercooledScene extends Phaser.Scene {
   }
 
   private drawItems(state: GameState): void {
+    for (const [itemId, sprite] of this.itemSprites) {
+      const item = state.items[itemId];
+      if (item === undefined || item.location.kind === "discarded") {
+        sprite.destroy();
+        this.itemSprites.delete(itemId);
+      } else {
+        sprite.setVisible(false);
+      }
+    }
+
     const installedOffsets = new Map<string, number>();
     for (const item of Object.values(state.items)) {
       if (item.location.kind === "discarded") continue;
+      if (item.kind === "cryo-lance") continue;
       let x: number;
       let y: number;
-      let scale = 1;
+      let size: number;
 
       if (item.location.kind === "held") {
         if (item.location.lane === "B" && !state.laneBRevealed) continue;
         const actor = this.actors[item.location.lane];
-        x = actor.x + (item.location.lane === "A" ? 29 : -29);
+        x = actor.x + (item.location.lane === "A" ? 35 : -35);
         y = actor.y - 71;
-        scale = 0.82;
+        size = 56;
       } else if (item.location.kind === "dropped") {
         if (item.location.lane === "B" && !state.laneBRevealed) continue;
         const point = gridToWorld(item.location.lane, item.location.position);
         x = point.x;
-        y = point.y - 5;
-        scale = 1;
+        y = point.y - 18;
+        size = 60 * (point.scale / 0.37);
       } else {
         if (item.location.lane === "B" && !state.laneBRevealed) continue;
         const localX =
@@ -675,15 +975,90 @@ export class UndercooledScene extends Phaser.Scene {
         installedOffsets.set(key, index + 1);
         const direction = item.location.lane === "A" ? 1 : -1;
         x = point.x + direction * (index - 1) * 19;
-        y = point.y + 34;
-        scale = 0.66;
+        y = point.y - 72;
+        size = item.kind.startsWith("pulse-") ? 42 : 48;
       }
 
-      this.drawItemGlyph(this.stateLayer, item, x, y, scale);
+      const texture = ITEM_TEXTURES[item.kind as Exclude<ItemKind, "cryo-lance">];
+      const sprite = this.itemSprites.get(item.id) ?? this.createItemSprite(item.id, texture);
+      sprite
+        .setVisible(true)
+        .setTexture(texture)
+        .setPosition(x, y)
+        .setDisplaySize(size, size)
+        .setFlipX(item.lane === "B")
+        .setDepth(101 + y / 30);
+      if (item.charge !== null) {
+        const charge = Phaser.Math.Clamp(item.charge / 100, 0, 1);
+        this.stateLayer.fillStyle(COLORS.void, 0.88);
+        this.stateLayer.fillRoundedRect(x - 24, y + size * 0.42, 48, 6, 3);
+        this.stateLayer.fillStyle(COLORS.cyan, 0.94);
+        this.stateLayer.fillRoundedRect(x - 24, y + size * 0.42, 48 * charge, 6, 3);
+      }
       if (item.location.kind === "dropped" && item.expiresAtMs !== null) {
         const lifetime = Math.max(1, state.level.dropLifetimeMs);
         const remaining = Phaser.Math.Clamp((item.expiresAtMs - state.simTimeMs) / lifetime, 0, 1);
         this.drawProgressArc(x, y, 34, remaining, remaining < 0.3 ? COLORS.alarm : COLORS.whiteGold);
+      }
+    }
+  }
+
+  private createItemSprite(itemId: string, texture: string): Phaser.GameObjects.Image {
+    const sprite = this.add.image(0, 0, texture).setOrigin(0.5).setVisible(false);
+    this.itemSprites.set(itemId, sprite);
+    return sprite;
+  }
+
+  private syncLanceSprites(state: GameState): void {
+    for (const laneId of LANE_IDS) {
+      const obscured = laneId === "B" && !state.laneBRevealed;
+      const activeLance = Object.values(state.items).find(
+        (item) => item.lane === laneId && item.kind === "cryo-lance" && item.location.kind !== "discarded",
+      );
+      const rackSprite = this.lanceRackSprites[laneId];
+      const itemSprite = this.lanceItemSprites[laneId];
+      rackSprite.setVisible(!obscured && activeLance === undefined);
+
+      if (obscured || activeLance === undefined) {
+        itemSprite.setVisible(false);
+        continue;
+      }
+
+      let x: number;
+      let y: number;
+      let size: number;
+      let flipX: boolean;
+      if (activeLance.location.kind === "held") {
+        const actorState = state.lanes[laneId].actor;
+        const actorImage = this.actors[laneId];
+        x = actorImage.x + (laneId === "A" ? 38 : -38);
+        y = actorImage.y - 72;
+        size = 76;
+        flipX = laneId === "A" ? actorState.facing !== "out" : actorState.facing === "out";
+      } else if (activeLance.location.kind === "dropped") {
+        const point = gridToWorld(laneId, activeLance.location.position);
+        x = point.x;
+        y = point.y - 18;
+        size = 74 * (point.scale / 0.37);
+        flipX = laneId === "A";
+      } else {
+        itemSprite.setVisible(false);
+        continue;
+      }
+
+      itemSprite
+        .setVisible(true)
+        .setPosition(x, y)
+        .setDisplaySize(size, size)
+        .setFlipX(flipX)
+        .setDepth(101 + y / 30);
+
+      if (activeLance.charge !== null) {
+        const charge = Phaser.Math.Clamp(activeLance.charge / 100, 0, 1);
+        this.stateLayer.fillStyle(COLORS.void, 0.88);
+        this.stateLayer.fillRoundedRect(x - 30, y + size * 0.44, 60, 7, 3);
+        this.stateLayer.fillStyle(COLORS.cyan, 0.95);
+        this.stateLayer.fillRoundedRect(x - 30, y + size * 0.44, 60 * charge, 7, 3);
       }
     }
   }
@@ -701,8 +1076,8 @@ export class UndercooledScene extends Phaser.Scene {
 
     if (state.processor.phase !== "idle") {
       this.stateLayer.lineStyle(4, color, 0.58);
-      this.stateLayer.lineBetween(616, 437, 765, 437);
-      this.stateLayer.lineBetween(835, 437, 984, 437);
+      this.stateLayer.lineBetween(646, 437, 765, 437);
+      this.stateLayer.lineBetween(835, 437, 954, 437);
     }
     if (state.currentJob.resultReady) {
       this.stateLayer.lineStyle(5, COLORS.accepted, pulse);
@@ -734,164 +1109,6 @@ export class UndercooledScene extends Phaser.Scene {
       false,
     );
     this.stateLayer.strokePath();
-  }
-
-  private drawItemGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    item: ItemState,
-    x: number,
-    y: number,
-    scale: number,
-  ): void {
-    if (item.kind.startsWith("pulse-")) {
-      const pulse = item.kind.slice(-1) as "H" | "X" | "P";
-      const color = pulse === "H" ? COLORS.cyan : pulse === "X" ? COLORS.hotGold : COLORS.whiteGold;
-      this.drawPulseGlyph(graphics, pulse, x, y, scale, color);
-      return;
-    }
-    if (item.kind === "coupling-half") {
-      this.drawCouplingGlyph(graphics, x, y, scale, COLORS.whiteGold, item.lane);
-      return;
-    }
-    if (item.kind === "empty-canister" || item.kind === "result-canister") {
-      this.drawCanisterGlyph(graphics, x, y, scale, item.kind === "result-canister");
-      return;
-    }
-    if (item.kind === "coolant-cell") {
-      this.drawCoolantCellGlyph(graphics, x, y, scale);
-      return;
-    }
-    this.drawLanceGlyph(graphics, x, y, scale, COLORS.frost);
-    if (item.charge !== null) {
-      const charge = Phaser.Math.Clamp(item.charge / 100, 0, 1);
-      graphics.fillStyle(COLORS.void, 0.88);
-      graphics.fillRect(x - 20 * scale, y + 16 * scale, 40 * scale, 5 * scale);
-      graphics.fillStyle(COLORS.cyan, 0.9);
-      graphics.fillRect(x - 20 * scale, y + 16 * scale, 40 * scale * charge, 5 * scale);
-    }
-  }
-
-  private drawPulseGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    pulse: "H" | "X" | "P",
-    x: number,
-    y: number,
-    scale: number,
-    color: number,
-  ): void {
-    const width = 38 * scale;
-    const height = 27 * scale;
-    graphics.fillStyle(COLORS.void, 0.94);
-    graphics.fillRoundedRect(x - width / 2, y - height / 2, width, height, 5 * scale);
-    graphics.lineStyle(3 * scale, color, 1);
-    graphics.strokeRoundedRect(x - width / 2, y - height / 2, width, height, 5 * scale);
-    const left = x - 7 * scale;
-    const right = x + 7 * scale;
-    const top = y - 7 * scale;
-    const bottom = y + 7 * scale;
-    graphics.lineStyle(2.8 * scale, color, 1);
-    if (pulse === "H") {
-      graphics.lineBetween(left, top, left, bottom);
-      graphics.lineBetween(right, top, right, bottom);
-      graphics.lineBetween(left, y, right, y);
-    } else if (pulse === "X") {
-      graphics.lineBetween(left, top, right, bottom);
-      graphics.lineBetween(right, top, left, bottom);
-    } else {
-      graphics.lineBetween(left, top, left, bottom);
-      graphics.beginPath();
-      graphics.arc(left, y - 2 * scale, 8 * scale, -Math.PI / 2, Math.PI / 2, false);
-      graphics.strokePath();
-    }
-  }
-
-  private drawAuxGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    x: number,
-    y: number,
-    scale: number,
-    color: number,
-  ): void {
-    graphics.lineStyle(3 * scale, color, 0.95);
-    graphics.strokeCircle(x, y, 13 * scale);
-    graphics.lineBetween(x - 8 * scale, y, x + 8 * scale, y);
-    graphics.lineBetween(x, y - 8 * scale, x, y + 8 * scale);
-  }
-
-  private drawCouplingGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    x: number,
-    y: number,
-    scale: number,
-    color: number,
-    laneId: LaneId,
-  ): void {
-    const direction = laneId === "A" ? 1 : -1;
-    graphics.fillStyle(COLORS.void, 0.94);
-    graphics.fillCircle(x, y, 14 * scale);
-    graphics.lineStyle(3 * scale, color, 1);
-    graphics.beginPath();
-    graphics.arc(
-      x,
-      y,
-      12 * scale,
-      laneId === "A" ? -Math.PI / 2 : Math.PI / 2,
-      laneId === "A" ? Math.PI / 2 : (Math.PI * 3) / 2,
-      false,
-    );
-    graphics.strokePath();
-    graphics.lineBetween(x, y, x + direction * 22 * scale, y);
-    graphics.fillCircle(x + direction * 22 * scale, y, 4 * scale);
-  }
-
-  private drawCanisterGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    x: number,
-    y: number,
-    scale: number,
-    full: boolean,
-  ): void {
-    graphics.fillStyle(COLORS.void, 0.95);
-    graphics.fillRoundedRect(x - 15 * scale, y - 18 * scale, 30 * scale, 36 * scale, 8 * scale);
-    graphics.lineStyle(3 * scale, full ? COLORS.accepted : COLORS.whiteGold, 1);
-    graphics.strokeRoundedRect(x - 15 * scale, y - 18 * scale, 30 * scale, 36 * scale, 8 * scale);
-    graphics.lineBetween(x - 9 * scale, y - 10 * scale, x + 9 * scale, y - 10 * scale);
-    if (full) {
-      graphics.fillStyle(COLORS.cyan, 0.9);
-      for (const offsetX of [-6, 6]) {
-        for (const offsetY of [0, 10]) graphics.fillCircle(x + offsetX * scale, y + offsetY * scale, 2.8 * scale);
-      }
-    }
-  }
-
-  private drawCoolantCellGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    x: number,
-    y: number,
-    scale: number,
-  ): void {
-    graphics.fillStyle(COLORS.cyan, 0.22);
-    graphics.fillRoundedRect(x - 12 * scale, y - 22 * scale, 24 * scale, 44 * scale, 11 * scale);
-    graphics.lineStyle(3 * scale, COLORS.frost, 0.95);
-    graphics.strokeRoundedRect(x - 12 * scale, y - 22 * scale, 24 * scale, 44 * scale, 11 * scale);
-    graphics.lineBetween(x - 7 * scale, y, x + 7 * scale, y);
-  }
-
-  private drawLanceGlyph(
-    graphics: Phaser.GameObjects.Graphics,
-    x: number,
-    y: number,
-    scale: number,
-    color: number,
-  ): void {
-    graphics.lineStyle(6 * scale, COLORS.void, 0.95);
-    graphics.lineBetween(x - 19 * scale, y + 10 * scale, x + 17 * scale, y - 11 * scale);
-    graphics.lineStyle(3 * scale, color, 1);
-    graphics.lineBetween(x - 19 * scale, y + 10 * scale, x + 17 * scale, y - 11 * scale);
-    graphics.fillStyle(COLORS.cyan, 0.95);
-    graphics.fillCircle(x + 20 * scale, y - 13 * scale, 4 * scale);
-    graphics.lineStyle(4 * scale, COLORS.hotGold, 0.9);
-    graphics.lineBetween(x - 17 * scale, y + 8 * scale, x - 8 * scale, y + 17 * scale);
   }
 
   private consumePresentationEvents(state: GameState): void {

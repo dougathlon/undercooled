@@ -27,7 +27,7 @@ import {
 } from "./test-helpers";
 
 describe("whole paired service workflow", () => {
-  it("accepts, prepares, loads once, records repeated shots, submits one job, then resets", () => {
+  it("accepts, prepares, loads, measures, submits, and completes only after reset", () => {
     const state = start(createGameState(1, 111));
     acceptAndPrepare(state);
     expect(state.currentJob.stage).toBe("load");
@@ -62,20 +62,21 @@ describe("whole paired service workflow", () => {
 
     expect(state.score.acceptedJobs).toBe(1);
     expect(state.score.validShots).toBe(1);
-    expect(state.laneBRevealed).toBe(true);
+    expect(state.laneBRevealed).toBe(false);
     expect(state.currentJob.stage).toBe("reset");
+    expect(state.phase).toBe("running");
 
     placeBoth(state, READOUT_POSITION, "up");
     pressInteract(state);
-    expect(state.currentJob.stage).toBe("accept");
-    expect(state.currentJob.definition.id).toBe("L1-J2");
+    expect(state.phase).toBe("complete");
+    expect(state.currentJob.stage).toBe("reset");
     expect(state.events.some((event) => event.type === "processor-reset")).toBe(true);
   });
 
   it("installs two coupling halves before the paired timing-window action", () => {
-    const state = start(createGameState(1, 222));
-    state.currentJob.definition = state.level.jobs[2];
+    const state = start(createGameState(4, 222));
     state.currentJob.stage = "couple-install";
+    state.manifest.riskStreams[riskAddress(4, "COUPLE", "interaction")].records[0].bits = [0, 0];
     for (const laneId of ["A", "B"] as const) {
       state.lanes[laneId].job.prepared = true;
       state.lanes[laneId].job.loadedPulses = [...state.currentJob.definition.pulses[laneId]];
@@ -95,8 +96,7 @@ describe("whole paired service workflow", () => {
   });
 
   it("collects only each lane's next expected pulse under aligned shared movement", () => {
-    const state = start(createGameState(1, 223));
-    state.currentJob.definition = state.level.jobs[1];
+    const state = start(createGameState(2, 223));
     state.currentJob.stage = "load";
 
     placeBoth(state, SUPPLY_POSITIONS.H, "out");
@@ -110,56 +110,46 @@ describe("whole paired service workflow", () => {
     expect(state.items[state.lanes.B.actor.heldItemId ?? ""]?.kind).toBe("pulse-X");
   });
 
-  it("stages at most one first pulse per lane for the next job and preserves it through reset", () => {
-    const state = start(createGameState(8, 224));
-    state.currentJob.stage = "run";
-    const upcoming = state.level.jobs[1];
+  it("keeps the hidden coworker mechanically active and reveals it at run two start", () => {
+    const hidden = start(createGameState(1));
+    expect(hidden.laneBRevealed).toBe(false);
+    placeBoth(hidden, { x: 2, y: 2 }, "in");
+    dispatchCommand(hidden, { type: "move", direction: "in" });
+    expect(hidden.lanes.A.actor.position).toEqual({ x: 3, y: 2 });
+    expect(hidden.lanes.B.actor.position).toEqual({ x: 3, y: 2 });
+    expect(hidden.laneBRevealed).toBe(false);
 
-    placeBoth(state, SUPPLY_POSITIONS.H, "out");
-    pressInteract(state);
-    placeBoth(state, SUPPLY_POSITIONS.X, "out");
-    pressInteract(state);
-    expect(state.items[state.lanes.A.actor.heldItemId ?? ""]).toMatchObject({
-      kind: "pulse-H",
-      jobId: upcoming.id,
-    });
-    expect(state.items[state.lanes.B.actor.heldItemId ?? ""]).toMatchObject({
-      kind: "pulse-X",
-      jobId: upcoming.id,
-    });
-
-    placeBoth(state, PULSE_BUFFER_POSITION, "down");
-    pressInteract(state);
-    const staged = Object.values(state.items).filter(
-      (item) => item.jobId === upcoming.id && item.location.kind === "dropped",
-    );
-    expect(staged).toHaveLength(2);
-    expect(staged.every((item) => item.expiresAtMs === null)).toBe(true);
-
-    // Returning to either rack cannot mint another prestaged pulse.
-    placeBoth(state, SUPPLY_POSITIONS.H, "out");
-    pressInteract(state);
-    expect(Object.values(state.items).filter((item) => item.jobId === upcoming.id)).toHaveLength(2);
-
-    state.currentJob.stage = "reset";
-    placeBoth(state, READOUT_POSITION, "up");
-    pressInteract(state);
-    expect(state.currentJob.definition.id).toBe(upcoming.id);
-    expect(staged.every((item) => item.location.kind === "dropped")).toBe(true);
-
-    placeBoth(state, PULSE_BUFFER_POSITION, "down");
-    pressInteract(state);
-    expect(state.lanes.A.actor.heldItemId).toBe(staged.find((item) => item.lane === "A")?.id);
-    expect(state.lanes.B.actor.heldItemId).toBe(staged.find((item) => item.lane === "B")?.id);
+    const revealed = createGameState(2);
+    expect(revealed.laneBRevealed).toBe(false);
+    start(revealed);
+    expect(revealed.laneBRevealed).toBe(true);
+    expect(revealed.events.some((event) => event.type === "lane-revealed")).toBe(true);
   });
 });
 
 describe("persistent risk recovery", () => {
-  it("recovers the scripted one-sided pulse fumble and retries with the next cached record", () => {
-    const state = start(createGameState(2, 333));
+  it("records only the channel that actually activates an out-of-phase risk address", () => {
+    const state = start(createGameState(3));
     acceptAndPrepare(state);
-    const address = riskAddress(2, "PULSE", "interaction");
-    state.manifest.riskStreams[address].records[1].bits = [0, 0];
+
+    placeLane(state, "A", SUPPLY_POSITIONS.H, "out");
+    placeLane(state, "B", { x: 1, y: 3 }, "down");
+    pressInteract(state);
+    placeLane(state, "A", PULSE_POSITION, "up");
+    pressInteract(state);
+
+    const risk = state.events.find((event) => event.type === "risk-consumed");
+    expect(risk?.bits).toEqual([0, 1]);
+    expect(risk?.participants).toEqual(["A"]);
+    expect(state.lanes.A.job.loadedPulses).toEqual(["H"]);
+    expect(state.lanes.B.job.loadedPulses).toEqual([]);
+    expect(state.events.some((event) => event.type === "fumble")).toBe(false);
+  });
+
+  it("recovers the scripted one-sided pulse fumble and retries with the next cached record", () => {
+    const state = start(createGameState(3));
+    acceptAndPrepare(state);
+    const address = riskAddress(3, "PULSE", "interaction");
     collectAndInstallNextPulses(state);
 
     expect(state.lanes.A.job.loadedPulses).toEqual(["H"]);
@@ -178,7 +168,8 @@ describe("persistent risk recovery", () => {
 
     placeLane(state, "B", PULSE_POSITION, "up");
     pressInteract(state);
-    expect(state.currentJob.stage).toBe("canister");
+    expect(state.lanes.B.job.loadedPulses).toEqual(["X"]);
+    expect(state.currentJob.stage).toBe("load");
     expect(state.manifest.riskStreams[address].cursor).toBe(2);
     expect(state.score.recoveries).toBe(1);
   });
@@ -193,7 +184,7 @@ describe("persistent risk recovery", () => {
 
     advanceFor(state, state.level.dropLifetimeMs + 100);
 
-    expect(state.lanes.B.replacementKind).toBe("pulse-H");
+    expect(state.lanes.B.replacementKind).toBe("pulse-X");
     expect(state.score.expiries).toBe(1);
     expect(state.events.some((event) => event.type === "object-expired")).toBe(true);
   });
@@ -201,7 +192,7 @@ describe("persistent risk recovery", () => {
 
 describe("classical cooling and cached shot integrity", () => {
   it("carries and aims the cryo lance while leaving both manifest cursors untouched", () => {
-    const state = start(createGameState(10, 555));
+    const state = start(createGameState(4, 555));
     debugSetHeat(state, 82);
     for (const hotspot of state.cooling.hotspots) hotspot.heat = 60;
     placeBoth(state, LANCE_RACK_POSITION, "down");
@@ -247,7 +238,7 @@ describe("classical cooling and cached shot integrity", () => {
   });
 
   it("preserves banked whole jobs across shutdown", () => {
-    const state = start(createGameState(10));
+    const state = start(createGameState(4));
     state.score.acceptedJobs = 3;
     debugSetHeat(state, state.level.heat.maximum);
     advanceFor(state, 50);

@@ -5,19 +5,57 @@ import type {
   Direction,
   GameEvent,
   GameState,
+  ItemKind,
   JobStage,
   LaneId,
   LevelConfig,
   Provenance,
   PulseKind,
 } from "../simulation/types";
+import { LANE_IDS } from "../simulation/types";
 
 type OverlayMode = "title" | "briefing" | "pause" | "result" | null;
 
 const PROVENANCE_LABELS: Record<Provenance, string> = {
   simulator: "Simulator cache",
-  scripted: "Scripted tutorial",
+  scripted: "Scripted demo",
   hardware: "Hardware-derived cache",
+};
+
+const DEMO_LIMIT = 4;
+
+interface DemoFrame {
+  mode: string;
+  change: string;
+  rule: string;
+  takeaway: string;
+}
+
+const DEMO_FRAMES: Record<number, DemoFrame> = {
+  1: {
+    mode: "Solo",
+    change: "One visible worker completes a short deterministic service cycle.",
+    rule: "No risk records are consumed. Follow the highlighted station and supply nest.",
+    takeaway: "A second channel was receiving every mirrored command behind the screen.",
+  },
+  2: {
+    mode: "Pair revealed",
+    change: "The second worker is now visible. One command still controls both lanes.",
+    rule: "The cycle remains deterministic; each side may need a different cartridge.",
+    takeaway: "Shared mirrored controls can produce two different contextual actions.",
+  },
+  3: {
+    mode: "B-side risk",
+    change: "Later-game slice: marked actions and movement squares now consume cached risk records.",
+    rule: "Channel A is protected. Channel B may drop an item or miss a movement step.",
+    takeaway: "Prefetched records disrupted Channel B while Channel A remained protected.",
+  },
+  4: {
+    mode: "Joint risk",
+    change: "The protection is removed. Marked actions and squares can now affect either lane.",
+    rule: "A two-bit record may affect A, B, both workers, or neither worker.",
+    takeaway: "Joint risk records can place a fault on A, B, both workers, or neither.",
+  },
 };
 
 const STAGE_LABELS: Record<JobStage, string> = {
@@ -76,6 +114,68 @@ function pulseLabel(pulse: PulseKind): string {
   return pulse === "P" ? "Φ" : pulse;
 }
 
+function itemLabel(kind: ItemKind): string {
+  if (kind.startsWith("pulse-")) return `${pulseLabel(kind.slice(-1) as PulseKind)} cartridge`;
+  if (kind === "coupling-half") return "coupling half";
+  if (kind === "empty-canister") return "empty result canister";
+  if (kind === "result-canister") return "result canister";
+  if (kind === "coolant-cell") return "coolant cell";
+  return "cryo lance";
+}
+
+function demoFrame(level: LevelConfig): DemoFrame {
+  return DEMO_FRAMES[level.id] ?? {
+    mode: `Order ${level.id}`,
+    change: level.briefing,
+    rule: level.objective,
+    takeaway: `The processor accepted ${level.title}.`,
+  };
+}
+
+function riskKey(level: LevelConfig): string {
+  if (!level.features.interactionRisk && !level.features.movementRisk) {
+    return "RISK OFF · no marked square or action consumes a risk record";
+  }
+  if (!level.features.reciprocalRisk) {
+    return "00 → both succeed · 01 → B fumbles or misses · A remains protected";
+  }
+  return "00 → both succeed · 10 → A · 01 → B · 11 → both";
+}
+
+function mostRecentRiskCause(state: GameState, event: GameEvent): GameEvent | null {
+  if (!["risk-consumed", "fumble", "missed-step", "item-installed"].includes(event.type)) return null;
+  if (event.type === "risk-consumed") return event;
+  for (let index = state.events.length - 1; index >= 0; index -= 1) {
+    const candidate = state.events[index];
+    if (candidate.atMs < event.atMs) break;
+    if (candidate.type === "risk-consumed" && candidate.atMs === event.atMs) return candidate;
+  }
+  return null;
+}
+
+function riskEventMessage(state: GameState, event: GameEvent): string | null {
+  const risk = mostRecentRiskCause(state, event);
+  if (!risk?.source || !risk.bits) return null;
+  const consequences = state.events.filter(
+    (candidate) =>
+      candidate.id > risk.id &&
+      candidate.atMs === risk.atMs &&
+      (candidate.type === "fumble" || candidate.type === "missed-step"),
+  );
+  const lanes = [...new Set(consequences.flatMap((candidate) => candidate.lane ?? []))];
+  const participants = risk.participants ?? [...LANE_IDS];
+  const outcome =
+    consequences.length === 0
+      ? participants.length === 2
+        ? "BOTH SUCCEED"
+        : `${participants[0]} SUCCEEDS · OTHER SIDE NO ACTION`
+      : consequences.every((candidate) => candidate.type === "missed-step")
+        ? `${lanes.join(" + ")} MISS${lanes.length === 1 ? "ES" : ""} A STEP`
+        : `${lanes.join(" + ")} FUMBLE${lanes.length === 1 ? "S" : ""}`;
+  const fixture = risk.address?.split("/")[1] ?? "RISK";
+  return `${PROVENANCE_LABELS[risk.source].toUpperCase()} · ${risk.bits.join("")} · ${fixture} → ${outcome}`;
+}
+
 function circuitTrack(pulses: PulseKind[], loaded: PulseKind[], lane: LaneId): string {
   return pulses
     .map((pulse, index) => {
@@ -109,7 +209,7 @@ function laneStatus(state: GameState, lane: LaneId): string {
 }
 
 function mechanicLabels(level: LevelConfig): string[] {
-  const labels = ["Mirrored shared controls", "Repeated circuit shots", "Continuous cooling"];
+  const labels = ["Mirrored shared controls", "Measured circuit shots", "Continuous cooling"];
   if (level.features.interactionRisk) labels.push("Pulse-install risk");
   if (level.features.movementRisk) labels.push("Movement risk");
   if (level.features.reciprocalRisk) labels.push("Reciprocal joint faults");
@@ -117,15 +217,6 @@ function mechanicLabels(level: LevelConfig): string[] {
   if (level.features.pumpTrips) labels.push("Pump service");
   if (level.features.blockedLines) labels.push("Blocked coolant lines");
   return labels;
-}
-
-function starCount(state: GameState): number {
-  const value = state.score.acceptedJobs;
-  return state.level.starThresholds.reduce((total, threshold) => total + (value >= threshold ? 1 : 0), 0);
-}
-
-function stars(value: number): string {
-  return Array.from({ length: 3 }, (_, index) => (index < value ? "★" : "☆")).join("");
 }
 
 export class GameUI {
@@ -168,6 +259,7 @@ export class GameUI {
 
   showBriefing(levelId: number): void {
     this.session.selectLevel(levelId);
+    this.lastEventId = 0;
     const level = this.session.getState().level;
     this.input.setEnabled(false);
     this.overlayMode = "briefing";
@@ -196,9 +288,9 @@ export class GameUI {
     return `
       <div class="uc-shell" data-screen="title" data-thermal="nominal">
         <header class="uc-hud" data-testid="hud">
-          <div class="uc-brandplate"><span class="uc-brandplate__mark">U</span><strong>UNDERCOOLED</strong><small>V0.2 SERVICE BUILD</small></div>
-          <div class="uc-stat"><small>Order</small><strong data-ui="level">01 — The Other Pair</strong></div>
-          <div class="uc-stat"><small>Accepted jobs</small><strong data-ui="jobs" data-testid="jobs">0 / 3</strong></div>
+          <div class="uc-brandplate"><span class="uc-brandplate__mark">U</span><strong>UNDERCOOLED</strong><small>V0.4 FOUR-RUN DEMO</small></div>
+          <div class="uc-stat"><small>Demo</small><strong data-ui="level">01 — Solo Service</strong></div>
+          <div class="uc-stat"><small>Accepted cycles</small><strong data-ui="jobs" data-testid="jobs">0 / 1</strong></div>
           <div class="uc-stat uc-stat--heat"><small>Thermal load</small><strong data-ui="thermal">00% · NOMINAL</strong><i><b data-ui="thermal-fill"></b></i></div>
           <div class="uc-stat"><small>Shift</small><strong data-ui="clock">OPEN</strong></div>
           <div class="uc-provenance"><span data-ui="risk-source" data-source="simulator"><i></i><small>Risk</small><b>Awaiting trigger</b></span><span data-ui="shot-source" data-source="simulator"><i></i><small>Shot</small><b>Awaiting measurement</b></span></div>
@@ -208,14 +300,14 @@ export class GameUI {
         <section class="uc-jobstrip" data-testid="job-display">
           <div class="uc-jobstrip__title"><small>Joint job</small><strong data-ui="job-label">AWAITING ACCEPTANCE</strong></div>
           <div class="uc-track"><b>A</b><span data-ui="circuit-a"></span></div>
-          <div class="uc-stage"><small>Current operation</small><strong data-ui="stage">ACCEPT JOB</strong><span data-ui="shots">SHOTS 0 / 1</span></div>
+          <div class="uc-stage"><small>Current operation</small><strong data-ui="stage">ACCEPT JOB</strong><span data-ui="shots">SHOTS 0 / 1</span><span class="uc-stage__mobile" data-ui="mobile-status">Accept the job at the central readout.</span></div>
           <div class="uc-track uc-track--b"><b>B</b><span data-ui="circuit-b"></span></div>
         </section>
 
         <div class="uc-lane-state uc-lane-state--a"><b>A</b><span data-ui="lane-a">ACCEPT JOB</span></div>
         <div class="uc-lane-state uc-lane-state--b"><b>B</b><span data-ui="lane-b">COWORKER VEILED</span></div>
         <div class="uc-objective"><b>NEXT</b><span data-ui="objective">Accept the job at the central readout.</span></div>
-        <div class="uc-event" data-ui="event" role="status" aria-live="polite"><b data-ui="event-sigil">◆</b><span data-ui="event-message">The nerveworks is standing by.</span></div>
+        <div class="uc-event" data-ui="event" role="status" aria-live="polite"><b data-ui="event-sigil">◆</b><span data-ui="event-message">The service plant is standing by.</span></div>
 
         <div class="uc-key-help"><span><kbd>↑↓</kbd> VERTICAL</span><span><kbd>→ / D</kbd> IN</span><span><kbd>← / A</kbd> OUT</span><span><kbd>SPACE / E</kbd> ACTION · HOLD TO OPERATE OR SPRAY</span></div>
         <div class="uc-touch" data-testid="touch-controls" aria-label="Shared mirrored controls">
@@ -234,41 +326,55 @@ export class GameUI {
 
   private titleMarkup(): string {
     const current = this.session.getState().level.id;
-    const cards = LEVELS.map((level) => `
+    const cards = LEVELS.slice(0, DEMO_LIMIT).map((level) => {
+      const frame = demoFrame(level);
+      return `
       <button class="uc-level-card${level.id === current ? " is-current" : ""}" type="button" data-level="${level.id}" data-testid="level-${level.id}">
-        <b>${String(level.id).padStart(2, "0")}</b><span><strong>${escapeHtml(level.title)}</strong><small>${escapeHtml(level.subtitle)}</small></span><i>${level.features.reciprocalRisk ? "◇◇" : "◇"}</i>
-      </button>`).join("");
+        <b>${String(level.id).padStart(2, "0")}</b><span><strong>${escapeHtml(level.title)}</strong><small>${escapeHtml(frame.change)}</small></span><i>${escapeHtml(frame.mode)}</i>
+      </button>`;
+    }).join("");
     return `
       <div class="uc-panel uc-panel--title">
         <section class="uc-title-copy">
-          <p class="uc-kicker">A grotesque two-channel quantum service comedy <b>PROTOTYPE 0.2</b></p>
+          <p class="uc-kicker">Four-run Moth Quantum demonstration <b>PROTOTYPE 0.4</b></p>
           <h1><span>UNDER</span>COOLED</h1>
-          <p class="uc-deck">One set of commands. Two mirrored workers. Keep a baroque processor cold while preparing circuits, loading pulses, coupling channels, collecting variable shots, and deciding which body has time to fix the damage.</p>
-          <div class="uc-contract"><b>WHAT THE QPU DOES</b><p>Shot records supply valid measured bit-pairs. A separate prefetched risk stream maps joint records onto movement and handling fumbles. Cooling is classical infrastructure and never changes cached bits.</p></div>
-          <button class="uc-primary" type="button" data-action="begin" data-testid="begin">Inspect service order <span>→</span></button>
+          <p class="uc-deck">Learn one short service cycle, reveal the mirrored coworker, then watch prefetched quantum records enter marked actions and movement squares.</p>
+          <div class="uc-contract"><b>DEMO CONTRACT</b><p>Measured shot records and a separate risk stream are cached before play. The runtime consumes them in order. Cooling remains classical maintenance and never changes a cached bit.</p></div>
+          <button class="uc-primary" type="button" data-action="begin" data-testid="begin">Inspect selected demo <span>→</span></button>
         </section>
-        <section class="uc-level-select"><header><b>TEN SERVICE ORDERS</b><small>all unlocked for prototype testing</small></header><div>${cards}</div></section>
+        <section class="uc-level-select"><header><b>FOUR DEMO RUNS</b><small>all unlocked for live presentation</small></header><div>${cards}</div></section>
       </div>`;
   }
 
   private briefingMarkup(level: LevelConfig): string {
-    const mechanics = mechanicLabels(level).map((label) => `<li>${escapeHtml(label)}</li>`).join("");
-    const workflow = "Accept → Prepare → Load → Couple → Run / Measure → Submit → Reset";
+    const frame = demoFrame(level);
+    const mechanics = mechanicLabels(level).slice(0, 5).map((label) => `<li>${escapeHtml(label)}</li>`).join("");
+    const workflow = [
+      "Accept",
+      "Prepare",
+      "Load",
+      ...(level.jobs[0]?.coupledGate ? ["Couple"] : []),
+      "Canister",
+      "Run / Measure",
+      "Submit",
+      "Reset",
+    ];
     return `
       <div class="uc-panel uc-panel--briefing">
-        <div class="uc-order-stamp"><strong>${String(level.id).padStart(2, "0")}</strong><small>SERVICE ORDER</small></div>
+        <div class="uc-order-stamp"><strong>${String(level.id).padStart(2, "0")}</strong><small>DEMO / 04</small></div>
         <section>
-          <p class="uc-kicker">Accepted paired service job / ${level.durationMs === null ? "untimed" : `${Math.round(level.durationMs / 1000)} second shift`}</p>
+          <p class="uc-kicker">${escapeHtml(frame.mode)} / ${level.durationMs === null ? "untimed" : `${Math.round(level.durationMs / 1000)} second shift`}</p>
           <h2>${escapeHtml(level.title)}</h2><p class="uc-subtitle">${escapeHtml(level.subtitle)}</p>
-          <p class="uc-briefing-text">${escapeHtml(level.briefing)}</p>
-          <div class="uc-workflow">${workflow.split(" → ").map((step) => `<span>${step}</span>`).join("<i>→</i>")}</div>
-          <div class="uc-order-objective"><b>REQUIRED</b><span>${escapeHtml(level.objective)}</span></div>
+          <div class="uc-demo-change"><b>WHAT CHANGES</b><span>${escapeHtml(frame.change)}</span></div>
+          <div class="uc-workflow">${workflow.map((step) => `<span>${step}</span>`).join("<i>→</i>")}</div>
+          <div class="uc-order-objective"><b>FINISH</b><span>${escapeHtml(level.objective)}</span></div>
+          <div class="uc-risk-key"><b>RISK KEY</b><span>${escapeHtml(riskKey(level))}</span></div>
           <ul class="uc-mechanics">${mechanics}</ul>
         </section>
         <aside>
-          <dl><div><dt>Accepted jobs</dt><dd>${level.targetJobs}</dd></div><div><dt>Drop recovery</dt><dd>${level.features.dropExpiryEnabled ? `${level.dropLifetimeMs / 1000}s before expiry` : "no expiry"}</dd></div><div><dt>Cooling</dt><dd>Carry, aim, and hold the cryo lance at exterior manifolds</dd></div><div><dt>Controls</dt><dd>IN and OUT mirror across the processor</dd></div></dl>
-          <p>The cartridges are classical control programs for pulses. The qubits stay sealed inside the processor. Identical runs may legitimately produce different measured bit-pairs.</p>
-          <div class="uc-modal-actions"><button class="uc-secondary" type="button" data-action="back">Orders</button><button class="uc-primary" type="button" data-action="start" data-testid="start-level">Begin shift <span>→</span></button></div>
+          <dl><div><dt>Visible rule</dt><dd>${escapeHtml(frame.rule)}</dd></div><div><dt>Accepted cycle</dt><dd>${level.targetJobs} paired service job${level.targetJobs === 1 ? "" : "s"}</dd></div><div><dt>Shared controls</dt><dd>IN and OUT mirror across the processor; ACTION follows local context.</dd></div></dl>
+          <p>Take cartridges from the outer benches and carry them to the highlighted station. A scripted opening is labelled as scripted; later simulator or hardware-cache records retain their own provenance.</p>
+          <div class="uc-modal-actions"><button class="uc-secondary" type="button" data-action="back">Demo menu</button><button class="uc-primary" type="button" data-action="start" data-testid="start-level">Begin demo ${level.id} <span>→</span></button></div>
         </aside>
       </div>`;
   }
@@ -280,8 +386,15 @@ export class GameUI {
   private resultMarkup(state: GameState): string {
     const shutdown = state.phase === "shutdown";
     const complete = state.phase === "complete";
-    const heading = shutdown ? "PLANT SHUTDOWN" : complete ? "ORDER ACCEPTED" : "SHIFT ABANDONED";
-    return `<div class="uc-panel uc-panel--result"><div class="uc-result-seal">${shutdown ? "△" : "Q"}</div><p class="uc-kicker">Service order ${String(state.level.id).padStart(2, "0")} / final ledger</p><h2>${heading}</h2><div class="uc-stars">${stars(shutdown ? 0 : starCount(state))}</div><p>${shutdown ? "The external refrigeration plant lost its service margin. Cached quantum records remain unaltered." : `The processor accepted ${state.score.acceptedJobs} paired service job${state.score.acceptedJobs === 1 ? "" : "s"}.`}</p><div class="uc-result-ledger"><span><small>Accepted jobs</small><b>${state.score.acceptedJobs}</b></span><span><small>Valid shots</small><b>${state.score.validShots}</b></span><span><small>Rejected shots</small><b>${state.score.rejectedShots}</b></span><span><small>Recoveries</small><b>${state.score.recoveries}</b></span><span><small>Mixed actions</small><b>${state.score.mixedActions}</b></span></div><div class="uc-modal-actions"><button class="uc-primary" type="button" data-action="next" data-testid="next-level" ${state.level.id >= LEVELS.length ? "disabled" : ""}>${state.level.id >= LEVELS.length ? "All orders complete" : "Next order"}<span>→</span></button><button class="uc-secondary" type="button" data-action="retry">Retry</button><button class="uc-text-button" type="button" data-action="menu">Orders</button></div></div>`;
+    const frame = demoFrame(state.level);
+    const lastDemoId = Math.min(DEMO_LIMIT, LEVELS.length);
+    const nextLevel = state.level.id < lastDemoId ? LEVELS.find((level) => level.id === state.level.id + 1) : undefined;
+    const heading = shutdown ? "PLANT SHUTDOWN" : complete ? `DEMO ${state.level.id} COMPLETE` : "SHIFT ABANDONED";
+    const takeaway = shutdown
+      ? "The external refrigeration plant lost its service margin. Cached quantum records remain unaltered."
+      : frame.takeaway;
+    const nextLabel = nextLevel ? `Start demo ${nextLevel.id}: ${demoFrame(nextLevel).mode}` : "All four demos complete";
+    return `<div class="uc-panel uc-panel--result"><div class="uc-result-seal">${shutdown ? "△" : String(state.level.id).padStart(2, "0")}</div><p class="uc-kicker">Demo ${String(state.level.id).padStart(2, "0")} of ${String(lastDemoId).padStart(2, "0")} / takeaway</p><h2>${heading}</h2><p class="uc-result-takeaway">${escapeHtml(takeaway)}</p><div class="uc-result-ledger"><span><small>Accepted cycles</small><b>${state.score.acceptedJobs}</b></span><span><small>Valid shots</small><b>${state.score.validShots}</b></span><span><small>Recoveries</small><b>${state.score.recoveries}</b></span></div><div class="uc-next-preview"><b>NEXT</b><span>${escapeHtml(nextLevel ? demoFrame(nextLevel).change : "The four-step demonstration is complete.")}</span></div><div class="uc-modal-actions"><button class="uc-primary" type="button" data-action="next" data-testid="next-level" ${nextLevel ? "" : "disabled"}>${escapeHtml(nextLabel)}<span>→</span></button><button class="uc-secondary" type="button" data-action="retry">Replay demo</button><button class="uc-text-button" type="button" data-action="menu">Demo menu</button></div></div>`;
   }
 
   private hideOverlay(): void {
@@ -304,7 +417,8 @@ export class GameUI {
       : '<em class="uc-channel-unknown">REMOTE CHANNEL OCCLUDED</em>';
     query(this.root, "[data-ui='lane-a']").textContent = laneStatus(state, "A");
     query(this.root, "[data-ui='lane-b']").textContent = laneStatus(state, "B");
-    query(this.root, "[data-ui='objective']").textContent = this.nextInstruction(state);
+    const instruction = this.nextInstruction(state);
+    query(this.root, "[data-ui='objective']").textContent = instruction;
     query(this.root, "[data-ui='clock']").textContent = formatClock(state.shiftRemainingMs);
 
     const load = Math.max(0, Math.min(state.level.heat.maximum, state.cooling.load));
@@ -313,11 +427,16 @@ export class GameUI {
     (query<HTMLElement>(this.root, "[data-ui='thermal-fill']")).style.width = `${ratio * 100}%`;
     this.shell.dataset.thermal = state.cooling.band;
 
-    this.renderProvenance("risk", state.manifest.lastRisk?.source ?? "simulator", state.manifest.lastRisk ? `${bitLabel(state.manifest.lastRisk.bits)} · ${state.manifest.lastRisk.address}` : "Awaiting trigger");
+    this.renderRiskProvenance(state);
     this.renderProvenance("shot", state.manifest.lastShot?.source ?? "simulator", state.manifest.lastShot ? `${bitLabel(state.manifest.lastShot.bits)} · ${state.manifest.lastShot.jobId}` : "Awaiting measurement");
 
     const event = state.events.at(-1);
-    if (event && event.id !== this.lastEventId) this.renderEvent(event);
+    const eventSummary = event ? riskEventMessage(state, event) : null;
+    query(this.root, "[data-ui='mobile-status']").textContent =
+      event && state.simTimeMs - event.atMs <= 3_500
+        ? `${eventSummary ? EVENT_SIGILS["risk-consumed"] : EVENT_SIGILS[event.type] ?? "◆"} ${eventSummary ?? event.message}`
+        : instruction;
+    if (event && event.id !== this.lastEventId) this.renderEvent(event, eventSummary);
     if (state.phase === "paused" && this.overlayMode !== "pause") this.showPause(state);
     else if (state.phase === "running") {
       this.input.setEnabled(true);
@@ -327,13 +446,50 @@ export class GameUI {
 
   private nextInstruction(state: GameState): string {
     if (state.cooling.band === "critical") return "COOLING EMERGENCY — fetch a cryo lance, face an active exterior manifold, and hold ACTION.";
+    const dropped = Object.values(state.items).find(
+      (item) => item.location.kind === "dropped" && item.faultId !== null,
+    );
+    if (dropped?.location.kind === "dropped") {
+      const remaining = dropped.expiresAtMs === null
+        ? ""
+        : ` · ${Math.max(0, Math.ceil((dropped.expiresAtMs - state.simTimeMs) / 1_000))}s remaining`;
+      const buffer = dropped.kind.startsWith("pulse-")
+        ? "PULSE"
+        : dropped.kind === "coupling-half"
+          ? "COUPLE"
+          : "READOUT";
+      return `RECOVER — Channel ${dropped.lane}'s ${itemLabel(dropped.kind)} is in the striped ${buffer} buffer${remaining}. Move onto it and press ACTION.`;
+    }
+    const replacementLane = LANE_IDS.find((laneId) => state.lanes[laneId].replacementKind !== null);
+    if (replacementLane) {
+      const kind = state.lanes[replacementLane].replacementKind;
+      if (kind) return `REPLACEMENT — Channel ${replacementLane}: fetch a fresh ${itemLabel(kind)} from its outer supply nest.`;
+    }
+    if (
+      state.laneBRevealed &&
+      (state.lanes.A.actor.position.x !== state.lanes.B.actor.position.x ||
+        state.lanes.A.actor.position.y !== state.lanes.B.actor.position.y)
+    ) {
+      return "RESYNCHRONIZE — the workers are out of step. Move toward an end stop until one worker collides while the other catches up.";
+    }
     const stage = state.currentJob.stage;
-    if (stage === "accept") return "Both workers: face the central readout and press ACTION to accept the displayed job.";
+    if (stage === "accept") return "Face the central READOUT and press ACTION to accept the displayed job.";
     if (stage === "prepare") return "Move OUT to PREP, face the counter, and hold ACTION until both channels initialize.";
-    if (stage === "load") return "Fetch the next H, X, or Φ cartridge from each outer bench; carry it to PULSE and install in order.";
-    if (stage === "couple-install") return "Fetch both coupling halves from AUX and install them at COUPLE.";
+    if (stage === "load") {
+      const visibleLanes = state.laneBRevealed ? LANE_IDS : (["A"] as const);
+      const laneSteps = visibleLanes.map((laneId) => {
+        const actor = state.lanes[laneId].actor;
+        const held = actor.heldItemId ? state.items[actor.heldItemId] : null;
+        if (held) return `${laneId}: carry ${itemLabel(held.kind)} to PULSE`;
+        const index = state.lanes[laneId].job.loadedPulses.length;
+        const nextPulse = state.currentJob.definition.pulses[laneId][index];
+        return nextPulse ? `${laneId}: face OUT at the ${pulseLabel(nextPulse)} bench and take it` : `${laneId}: pulse sequence ready`;
+      });
+      return `NEXT CARTRIDGE — ${laneSteps.join(" · ")}. At a nest, face OUT before ACTION; then carry it to PULSE.`;
+    }
+    if (stage === "couple-install") return "Face OUT at both AUX benches, fetch the coupling halves, and install them at COUPLE.";
     if (stage === "couple-arm") return "Stand at both coupling ports and activate within the synchronization window.";
-    if (stage === "canister") return "The courier channel fetches an empty canister from AUX and attaches it at READOUT.";
+    if (stage === "canister") return `Channel ${state.currentJob.definition.courierLane}: face OUT at AUX, fetch the empty canister, and attach it at READOUT.`;
     if (stage === "run") return "Both channels activate READOUT. Repeat Run → Measure until the valid-shot quota is complete.";
     if (stage === "submission") return "Carry the detached result canister OUT to SUBMIT; invalid canisters belong in the entropy chute.";
     return "Return IN to the readout and activate both reset controls before accepting another job.";
@@ -345,12 +501,35 @@ export class GameUI {
     query(panel, "b").textContent = `${PROVENANCE_LABELS[source]} · ${text}`;
   }
 
-  private renderEvent(event: GameEvent): void {
+  private renderRiskProvenance(state: GameState): void {
+    const panel = query<HTMLElement>(this.root, "[data-ui='risk-source']");
+    const riskEnabled = state.level.features.interactionRisk || state.level.features.movementRisk;
+    if (!riskEnabled) {
+      panel.dataset.source = "inactive";
+      query(panel, "b").textContent = "Not used in this demo";
+      return;
+    }
+    const record = state.manifest.lastRisk;
+    if (record) {
+      panel.dataset.source = record.source;
+      query(panel, "b").textContent = `${PROVENANCE_LABELS[record.source]} · ${bitLabel(record.bits)} · ${record.address}`;
+      return;
+    }
+    const scriptedOpening = Object.values(state.manifest.riskStreams).some(
+      (stream) => stream.records[stream.cursor]?.source === "scripted",
+    );
+    panel.dataset.source = scriptedOpening ? "scripted" : "simulator";
+    query(panel, "b").textContent = scriptedOpening
+      ? "Scripted demo · opening ready"
+      : "Simulator cache · prefetched";
+  }
+
+  private renderEvent(event: GameEvent, summary: string | null = null): void {
     this.lastEventId = event.id;
     const toast = query<HTMLElement>(this.root, "[data-ui='event']");
     toast.dataset.kind = event.type;
-    query(toast, "[data-ui='event-sigil']").textContent = EVENT_SIGILS[event.type] ?? "◆";
-    query(toast, "[data-ui='event-message']").textContent = event.message;
+    query(toast, "[data-ui='event-sigil']").textContent = summary ? EVENT_SIGILS["risk-consumed"] ?? "◇" : EVENT_SIGILS[event.type] ?? "◆";
+    query(toast, "[data-ui='event-message']").textContent = summary ?? event.message;
     toast.classList.remove("is-fresh");
     void toast.offsetWidth;
     toast.classList.add("is-fresh");
@@ -372,7 +551,10 @@ export class GameUI {
     this.overlay.hidden = false;
     this.overlay.innerHTML = this.resultMarkup(state);
     const next = query<HTMLButtonElement>(this.overlay, "[data-action='next']");
-    if (!next.disabled) next.addEventListener("click", () => this.showBriefing(state.level.id + 1));
+    if (!next.disabled) next.addEventListener("click", () => {
+      this.showBriefing(state.level.id + 1);
+      this.startCurrentLevel();
+    });
     query<HTMLButtonElement>(this.overlay, "[data-action='retry']").addEventListener("click", () => { this.session.restart(); this.startCurrentLevel(); });
     query<HTMLButtonElement>(this.overlay, "[data-action='menu']").addEventListener("click", () => { this.session.selectLevel(state.level.id); this.showTitle(); });
   }

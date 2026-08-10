@@ -87,7 +87,7 @@ export interface JobDefinition {
   shotQuota: number;
   maxAttempts: number;
   maxRejectionRate: number;
-  deadlineMs: number;
+  deadlineMs: number | null;
   courierLane: LaneId;
 }
 
@@ -257,11 +257,13 @@ export interface GameEvent {
   address?: string;
   bits?: BitPair;
   source?: Provenance;
+  participants?: LaneId[];
   itemId?: string;
   jobId?: string;
 }
 
 export type JointProfile = "protected" | "reciprocal-no-double" | "full-joint";
+export type LaneBPresentation = "veiled" | "reveal-on-start" | "visible";
 
 export interface HeatProfile {
   maximum: number;
@@ -273,11 +275,12 @@ export interface HeatProfile {
   coolingPerSecond: number;
   reservoirDrainPerSecond: number;
   preparationHoldMs: number;
+  preparationValidityMs: number | null;
   pumpRestartHoldMs: number;
 }
 
 export interface LevelFeatures {
-  revealLaneBAfterJobs?: number;
+  laneBPresentation: LaneBPresentation;
   interactionRisk: boolean;
   movementRisk: boolean;
   reciprocalRisk: boolean;
@@ -308,6 +311,7 @@ export interface LevelConfig {
   interactionFailureRate: number;
   movementFailureRate: number;
   jointProfile: JointProfile;
+  manifestSeed?: number;
   features: LevelFeatures;
   heat: HeatProfile;
   jobs: JobDefinition[];

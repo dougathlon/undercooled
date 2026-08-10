@@ -25,9 +25,9 @@ describe("deterministic v2 simulation", () => {
       { atMs: 600, command: { type: "move", direction: "down" } },
       { atMs: 800, command: { type: "move", direction: "out" } },
     ];
-    const first = replay(5, 867_5309, log);
-    const second = replay(5, 867_5309, log);
-    const address = riskAddress(5, "TRANSFER", "movement");
+    const first = replay(3, 867_5309, log);
+    const second = replay(3, 867_5309, log);
+    const address = riskAddress(3, "TRANSFER", "movement");
 
     expect(serializeState(first)).toBe(serializeState(second));
     expect(first.manifest.riskStreams[address].cursor).toBe(1);
@@ -72,8 +72,8 @@ describe("deterministic v2 simulation", () => {
   });
 
   it("consumes movement risk on every eligible departure, not once per tile", () => {
-    const state = start(createGameState(5, 1234));
-    const address = riskAddress(5, "TRANSFER", "movement");
+    const state = start(createGameState(3, 1234));
+    const address = riskAddress(3, "TRANSFER", "movement");
     state.manifest.riskStreams[address].records[0].bits = [0, 0];
     state.manifest.riskStreams[address].records[1].bits = [0, 0];
 

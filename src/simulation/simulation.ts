@@ -16,7 +16,7 @@ import {
   riskAddress,
   samePosition,
 } from "./geometry";
-import { getLevel, starsForJobs } from "./levels";
+import { LEVELS, getLevel, starsForJobs } from "./levels";
 import {
   consumeRisk,
   consumeShot,
@@ -49,7 +49,6 @@ import { LANE_IDS } from "./types";
 
 const POSE_DURATION_MS = 620;
 const MOVE_LOCK_MS = 135;
-const PREPARATION_VALIDITY_MS = 60_000;
 const THERMAL_REJECTION_THRESHOLD = 75;
 const LANCE_CHARGE_PER_SECOND = 15;
 const RESERVOIR_CELL_CAPACITY = 48;
@@ -151,8 +150,9 @@ function thermalBand(load: number): ThermalBand {
   return "critical";
 }
 
-export function createGameState(levelId: number, seed = levelId * 10_007): GameState {
+export function createGameState(levelId: number, seed?: number): GameState {
   const level = getLevel(levelId);
+  const manifestSeed = seed ?? level.manifestSeed ?? levelId * 10_007;
   const hotspots = LANE_IDS.flatMap((laneId) => {
     const primary = {
       id: `${laneId}-manifold-1`,
@@ -192,7 +192,7 @@ export function createGameState(levelId: number, seed = levelId * 10_007): GameS
     },
     lanes: { A: createLane(), B: createLane() },
     items: {},
-    manifest: createManifestBundle(level, seed),
+    manifest: createManifestBundle(level, manifestSeed),
     cooling: {
       load: 12,
       band: "nominal",
@@ -215,7 +215,7 @@ export function createGameState(levelId: number, seed = levelId * 10_007): GameS
     },
     interactHeld: false,
     activeHoldLanes: [],
-    laneBRevealed: level.features.revealLaneBAfterJobs === undefined,
+    laneBRevealed: level.features.laneBPresentation === "visible",
     nextItemId: 1,
     nextFaultId: 1,
     nextEventId: 1,
@@ -567,7 +567,11 @@ function stagePrepulse(state: GameState, laneId: LaneId): void {
   });
 }
 
-function consumeRiskFor(state: GameState, fixture: string): RiskRecord | null {
+function consumeRiskFor(
+  state: GameState,
+  fixture: string,
+  participants: LaneId[],
+): RiskRecord | null {
   if (!state.level.features.interactionRisk) return null;
   const address = riskAddress(state.level.id, fixture, "interaction");
   const record = consumeRisk(state.manifest, address);
@@ -576,6 +580,7 @@ function consumeRiskFor(state: GameState, fixture: string): RiskRecord | null {
       address,
       bits: record.bits,
       source: record.source,
+      participants: [...participants],
       jobId: state.currentJob.definition.id,
     });
   }
@@ -634,7 +639,7 @@ function installationFailed(state: GameState, laneId: LaneId, record: RiskRecord
 
 function installPulses(state: GameState, lanes: LaneId[]): void {
   if (lanes.length === 0) return;
-  const record = consumeRiskFor(state, "PULSE");
+  const record = consumeRiskFor(state, "PULSE", lanes);
   for (const laneId of lanes) {
     const item = heldItem(state, laneId);
     const pulse = item ? itemPulse(item.kind) : null;
@@ -659,7 +664,7 @@ function installPulses(state: GameState, lanes: LaneId[]): void {
 
 function installCoupling(state: GameState, lanes: LaneId[]): void {
   if (lanes.length === 0) return;
-  const record = consumeRiskFor(state, "COUPLE");
+  const record = consumeRiskFor(state, "COUPLE", lanes);
   for (const laneId of lanes) {
     const item = heldItem(state, laneId);
     if (item?.kind !== "coupling-half") continue;
@@ -682,7 +687,7 @@ function installCanister(state: GameState, lanes: LaneId[]): void {
   if (!lanes.includes(courier)) return;
   const item = heldItem(state, courier);
   if (item?.kind !== "empty-canister") return;
-  const record = consumeRiskFor(state, "READOUT");
+  const record = consumeRiskFor(state, "READOUT", lanes);
   if (installationFailed(state, courier, record)) {
     dropHeldItem(state, courier, "readout");
     return;
@@ -698,7 +703,8 @@ function acceptJob(state: GameState, lanes: LaneId[]): void {
   if (lanes.length !== 2) return;
   const job = state.currentJob;
   job.acceptedAtMs = state.simTimeMs;
-  job.deadlineAtMs = state.simTimeMs + job.definition.deadlineMs;
+  job.deadlineAtMs =
+    job.definition.deadlineMs === null ? null : state.simTimeMs + job.definition.deadlineMs;
   state.processor.phase = "armed";
   setStage(state, "prepare");
   setPose(state, "A", "success");
@@ -729,7 +735,8 @@ function armCoupling(state: GameState, lanes: LaneId[]): void {
 function preparationIsFresh(state: GameState): boolean {
   return LANE_IDS.every((laneId) => {
     const lane = state.lanes[laneId].job;
-    return lane.prepared && lane.preparationExpiresAtMs !== null && lane.preparationExpiresAtMs >= state.simTimeMs;
+    return lane.prepared &&
+      (lane.preparationExpiresAtMs === null || lane.preparationExpiresAtMs >= state.simTimeMs);
   });
 }
 
@@ -788,7 +795,7 @@ function makeCanisterReady(state: GameState, valid: boolean): void {
 
 function runShot(state: GameState, lanes: LaneId[]): void {
   if (lanes.length !== 2 || state.processor.phase === "readout") return;
-  const risk = consumeRiskFor(state, "READOUT");
+  const risk = consumeRiskFor(state, "READOUT", lanes);
   const failed: LaneId[] = [];
   for (const laneId of LANE_IDS) {
     if (risk === null || laneBit(risk.bits, laneId) === 0) continue;
@@ -895,11 +902,6 @@ function submitResult(state: GameState, laneId: LaneId): void {
       itemId: item.id,
       jobId: state.currentJob.definition.id,
     });
-    const revealAt = state.level.features.revealLaneBAfterJobs;
-    if (!state.laneBRevealed && revealAt !== undefined && state.score.acceptedJobs >= revealAt) {
-      state.laneBRevealed = true;
-      addEvent(state, "lane-revealed", "Channel B was receiving the mirrored half of every command.");
-    }
     const coolingAt = state.level.features.guidedCoolingAfterJobs;
     if (coolingAt !== undefined && state.score.acceptedJobs >= coolingAt && state.cooling.completedServices === 0) {
       state.cooling.load = Math.max(state.cooling.load, 66);
@@ -916,12 +918,8 @@ function submitResult(state: GameState, laneId: LaneId): void {
     });
   }
 
-  if (state.score.acceptedJobs >= state.level.targetJobs) {
-    completeLevel(state, "level-completed");
-  } else {
-    state.processor.phase = "resetting";
-    setStage(state, "reset");
-  }
+  state.processor.phase = "resetting";
+  setStage(state, "reset");
 }
 
 function installCoolant(state: GameState, laneId: LaneId): void {
@@ -950,11 +948,15 @@ function resetProcessor(state: GameState, lanes: LaneId[]): void {
     state.lanes[laneId].job = createLaneJobState();
     state.lanes[laneId].replacementKind = null;
   }
-  state.currentJobIndex = (state.currentJobIndex + 1) % state.level.jobs.length;
-  state.currentJob = createJobState(state.level.jobs[state.currentJobIndex]);
   state.processor.phase = "idle";
   state.processor.phaseEndsAtMs = null;
   addEvent(state, "processor-reset", `Cleared ${finishedJobId}; qubits returned to their starting state.`);
+  if (state.score.acceptedJobs >= state.level.targetJobs) {
+    completeLevel(state, "level-completed");
+    return;
+  }
+  state.currentJobIndex = (state.currentJobIndex + 1) % state.level.jobs.length;
+  state.currentJob = createJobState(state.level.jobs[state.currentJobIndex]);
 }
 
 function processInteraction(state: GameState): void {
@@ -1014,7 +1016,10 @@ function processInteraction(state: GameState): void {
   }
 }
 
-function consumeMovementRisk(state: GameState): RiskRecord | null {
+function consumeMovementRisk(
+  state: GameState,
+  participants: LaneId[],
+): RiskRecord | null {
   const address = riskAddress(state.level.id, "TRANSFER", "movement");
   const record = consumeRisk(state.manifest, address);
   if (record) {
@@ -1022,6 +1027,7 @@ function consumeMovementRisk(state: GameState): RiskRecord | null {
       address,
       bits: record.bits,
       source: record.source,
+      participants: [...participants],
       jobId: state.currentJob.definition.id,
     });
   }
@@ -1051,7 +1057,7 @@ function processMove(state: GameState, direction: Direction): void {
     }
   }
 
-  const risk = riskEligible.length > 0 ? consumeMovementRisk(state) : null;
+  const risk = riskEligible.length > 0 ? consumeMovementRisk(state, riskEligible) : null;
   for (const laneId of LANE_IDS) {
     if (!legal[laneId]) continue;
     const lane = state.lanes[laneId];
@@ -1096,6 +1102,10 @@ export function dispatchCommand(state: GameState, command: SimulationCommand): G
   if (command.type === "start" && state.phase === "briefing") {
     state.phase = "running";
     addEvent(state, "level-started", `Level ${state.level.id}: ${state.level.title}`);
+    if (state.level.features.laneBPresentation === "reveal-on-start") {
+      state.laneBRevealed = true;
+      addEvent(state, "lane-revealed", "Channel B was receiving the mirrored half of every command.");
+    }
     return state;
   }
   if (command.type === "pause-toggle") {
@@ -1155,7 +1165,9 @@ function updatePreparation(state: GameState, deltaMs: number): void {
     for (const laneId of LANE_IDS) {
       const job = state.lanes[laneId].job;
       job.prepared = true;
-      job.preparationExpiresAtMs = state.simTimeMs + PREPARATION_VALIDITY_MS;
+      job.preparationExpiresAtMs = state.level.heat.preparationValidityMs === null
+        ? null
+        : state.simTimeMs + state.level.heat.preparationValidityMs;
       setPose(state, laneId, "success");
     }
     addEvent(state, "preparation-complete", "Both internal qubits were initialized together.", {
@@ -1363,8 +1375,6 @@ export function advanceSimulation(state: GameState, deltaMs: number): GameState 
 export function debugGrantAcceptedJobs(state: GameState, jobs: number): GameState {
   state.score.acceptedJobs = Math.max(state.score.acceptedJobs, jobs);
   state.processor.completedJobs = Math.max(state.processor.completedJobs, state.score.acceptedJobs);
-  const revealAt = state.level.features.revealLaneBAfterJobs;
-  if (revealAt !== undefined && state.score.acceptedJobs >= revealAt) state.laneBRevealed = true;
   if (state.score.acceptedJobs >= state.level.targetJobs) completeLevel(state, "level-completed");
   return state;
 }
@@ -1415,5 +1425,5 @@ export function replay(
 }
 
 export function nextLevelId(levelConfig: LevelConfig): number {
-  return Math.min(10, levelConfig.id + 1);
+  return Math.min(LEVELS.length, levelConfig.id + 1);
 }

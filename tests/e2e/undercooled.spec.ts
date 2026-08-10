@@ -241,19 +241,19 @@ test.describe("desktop production build", () => {
     await expect(page.locator("body")).not.toContainText(/control[- ]cassette|Moth auxiliary/i);
   });
 
-  test("offers ten orders and enters Level 1 through the player-facing flow", async ({ page }) => {
+  test("offers four demo runs and enters Solo Service through the player-facing flow", async ({ page }) => {
     const levelCards = page.locator("[data-testid^='level-']");
-    await expect(levelCards).toHaveCount(10);
-    for (let levelId = 1; levelId <= 10; levelId += 1) {
+    await expect(levelCards).toHaveCount(4);
+    for (let levelId = 1; levelId <= 4; levelId += 1) {
       await expect(page.getByTestId(`level-${levelId}`)).toBeVisible();
     }
-    await capture(page, "desktop-v2-title.png");
+    await capture(page, "desktop-v4-title.png");
 
     await page.getByTestId("begin").click();
     await page.getByTestId("start-level").click();
     await expect.poll(() => stateMeta(page)).toEqual({ phase: "running", levelId: 1 });
     await expect(page.getByTestId("overlay")).toBeHidden();
-    await capture(page, "desktop-v2-level-1-start.png");
+    await capture(page, "desktop-v4-level-1-start.png");
   });
 
   test("completes the first paired job through player controls", async ({ page }) => {
@@ -300,16 +300,18 @@ test.describe("desktop production build", () => {
     await pressAction(page);
 
     await expect.poll(() => gameplaySummary(page)).toEqual({
-      stage: "accept",
+      stage: "reset",
       acceptedJobs: 1,
       validShots: 1,
-      laneBRevealed: true,
+      laneBRevealed: false,
     });
-    await capture(page, "desktop-v2-first-job-complete.png");
+    await expect.poll(() => stateMeta(page)).toEqual({ phase: "complete", levelId: 1 });
+    await expect(page.getByTestId("next-level")).toContainText("Start demo 2");
+    await capture(page, "desktop-v4-solo-complete.png");
   });
 
-  test("keeps all ten authored levels bootable and emits replay v2", async ({ page }) => {
-    for (let levelId = 1; levelId <= 10; levelId += 1) {
+  test("keeps all four authored demos bootable and emits replay v2", async ({ page }) => {
+    for (let levelId = 1; levelId <= 4; levelId += 1) {
       expect(await startLevel(page, levelId)).toEqual({ phase: "running", levelId });
       await expect(page.getByTestId("overlay")).toBeHidden();
     }
@@ -337,7 +339,59 @@ test.describe("desktop production build", () => {
       stage: "accept",
       replay: "undercooled-replay-v2",
     });
-    await capture(page, "desktop-v2-level-10.png");
+    await capture(page, "desktop-v4-level-4.png");
+  });
+
+  test("reveals the coworker at demo two start", async ({ page }) => {
+    expect(await startLevel(page, 2)).toEqual({ phase: "running", levelId: 2 });
+    await expect.poll(() => gameplaySummary(page)).toMatchObject({ laneBRevealed: true });
+    await expect(page.locator("[data-ui='lane-b']")).not.toContainText("VEILED");
+    await capture(page, "desktop-v4-level-2-reveal.png");
+  });
+
+  test("shows the guaranteed B-side drop and simulator-cache missed step in demo three", async ({ page }) => {
+    test.setTimeout(180_000);
+    await startLevel(page, 3);
+
+    await pressAction(page);
+    await pressMovement(page, "ArrowLeft", 3);
+    await pressMovement(page, "ArrowUp");
+    await holdActionUntilStage(page, "load");
+
+    await pressMovement(page, "ArrowLeft");
+    await pressAction(page);
+    await pressMovement(page, "ArrowDown");
+    await pressMovement(page, "ArrowLeft");
+    await pressAction(page);
+    await pressMovement(page, "ArrowRight", 2);
+    await pressMovement(page, "ArrowUp");
+    await pressAction(page);
+
+    await expect(page.locator("[data-ui='event-message']")).toContainText(/SCRIPTED DEMO · 01 · PULSE → B FUMBLES/);
+    await expect(page.locator("[data-ui='objective']")).toContainText(/RECOVER.*Channel B/i);
+    await capture(page, "desktop-v4-level-3-b-drop.png");
+
+    await pressMovement(page, "ArrowDown");
+    await pressAction(page);
+    await pressMovement(page, "ArrowUp");
+    await pressAction(page);
+
+    await pressMovement(page, "ArrowLeft", 2);
+    await pressAction(page);
+    await pressMovement(page, "ArrowDown", 2);
+    await pressMovement(page, "ArrowLeft");
+    await pressAction(page);
+    await pressMovement(page, "ArrowRight", 2);
+    await pressMovement(page, "ArrowUp");
+
+    const positions = await actorPositions(page);
+    expect(positions).toEqual({ A: { x: 2, y: 1 }, B: { x: 2, y: 2 } });
+    await expect(page.locator("[data-ui='event-message']")).toContainText(/SIMULATOR CACHE · 01 · TRANSFER → B MISSES A STEP/);
+    await expect(page.locator("[data-ui='objective']")).toContainText("RESYNCHRONIZE");
+    await capture(page, "desktop-v4-level-3-b-missed-step.png");
+
+    await pressMovement(page, "ArrowUp", 2);
+    await expect(page.locator("[data-ui='objective']")).not.toContainText("RESYNCHRONIZE");
   });
 
   test("pause and resume preserve the active shift", async ({ page }) => {
@@ -405,6 +459,6 @@ test.describe("Pixel 7 landscape production build", () => {
       A: { x: before.A.x, y: before.A.y + 1 },
       B: { x: before.B.x, y: before.B.y + 1 },
     });
-    await capture(page, "pixel-7-landscape-v2-active.png");
+    await capture(page, "pixel-7-landscape-v4-active.png");
   });
 });

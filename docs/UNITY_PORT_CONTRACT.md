@@ -9,7 +9,7 @@ The files under `src/simulation/` are authoritative:
 - `GameState` contains every logical actor, item, station, job, plant, manifest, score, and timer state.
 - `dispatchCommand()` applies one discrete shared input to a snapshot of both lanes.
 - `advanceSimulation()` advances held operations, deadlines, and continuous plant load.
-- ten levels are data configurations, not ten scene-specific scripts;
+- the current four demo levels are data configurations, not scene-specific scripts; the same boundary supports a larger authored progression;
 - manifest generation and consumption are deterministic and retain provenance per record;
 - presentation events report outcomes but never decide them.
 
@@ -51,7 +51,8 @@ The repeated service cycle is:
 - H, X, and phase cartridges are portable classical pulse-program tokens, installed in the displayed order and retained for all shots in that job.
 - Coupled gates use two carried halves and a paired timing action.
 - Every run consumes one immutable `ShotRecord`, exposing `00`, `01`, `10`, or `11`.
-- The canister collects several accepted shot records; the score increments only when a whole paired service job is accepted.
+- The canister collects the configured accepted-shot quota; the v0.4 presentation demo uses one shot per job as a pacing compression, while the architecture supports repeated shots without reloading the circuit.
+- The score increments only when a whole paired service job is accepted, never for an individual shot.
 - A thermally invalid service attempt may reject a shot but must still log its original cached bits.
 - Reset clears the service configuration and starts the next authored job. Per-shot physical reinitialization is compressed into the automatic run sequence.
 
@@ -82,6 +83,17 @@ The lance is a comic compression of external maintenance, not a literal way to c
 
 ## Presentation boundary
 
-The visual target is an original auric nerveworks: detailed chased gold, black-enamel readable aprons, cold cyan refrigeration light, and grotesque pressure-workers. The 1600×900 plate supplies architecture only. Unity production art should split the rear vault, floor, station faces, foreground counter occluders, emissive masks, fixtures, and effects for reliable depth sorting.
+The selected visual target is an original porcelain-and-copper quantum service workshop: warm ivory enamel and burnished brass architecture, restrained cyan refrigeration light, blue/red lane identity, oversized verb-specific fixtures, portable service objects, and the cleaner Option 2 blue/red worker pair. The workers retain distinct silhouettes and comic physicality without the visual noise of the earlier grotesque pressure-worker pass. The 1600×900 browser plate supplies architecture only. Unity production art should split the rear shell, pale movement floor, station bodies, foreground counter occluders, emissive masks, fixtures, objects, and effects for reliable depth sorting.
 
 Ornament, reflections, heat shimmer, and organic machine motion may be unstable. Collision geometry, station highlights, item ownership, recovery countdowns, hot-zone targeting, and provenance displays must remain exact and readable.
+
+## v0.4 demonstration progression
+
+Unity should preserve the current teaching order even if level length or content later changes:
+
+1. hidden second channel with deterministic H/H service;
+2. second-worker reveal with deterministic, asymmetric H/X tasks;
+3. protected A side with a provenance-labelled scripted B drop followed by prefetched simulator risk, recovery, and deterministic resynchronization;
+4. full joint risk in which cached records may affect A, B, or both, combined with a coupled operation and continuous cooling pressure.
+
+The first three levels form the concise audience-facing explanation. The fourth is explicitly a later-game pressure sample. Scripted, simulator, and hardware-cache records must retain distinct provenance in any port.
