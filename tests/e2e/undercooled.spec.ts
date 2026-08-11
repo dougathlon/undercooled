@@ -26,6 +26,12 @@ const applicationOrigin = new URL(
   process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:4173/undercooled/",
 ).origin;
 const SCREENSHOT_DIRECTORY = resolve(process.cwd(), "test-results/screenshots");
+// GitHub's software-rendered 1600 x 900 Phaser canvas can make a complete
+// keyboard route substantially slower than the same route on presentation
+// hardware. Keep every gameplay assertion, but give full cycles a budget that
+// measures correctness rather than runner GPU throughput.
+const FULL_CYCLE_TIMEOUT_MS = 180_000;
+const COMPLEX_CYCLE_TIMEOUT_MS = 240_000;
 
 const test = base.extend<RuntimeFixtures>({
   runtimeErrors: async ({ page }, use) => {
@@ -242,6 +248,7 @@ test.describe("desktop clarity demo", () => {
   });
 
   test("scene one teaches a full service cycle without leaking the hidden coworker", async ({ page }) => {
+    test.setTimeout(FULL_CYCLE_TIMEOUT_MS);
     await page.getByTestId("begin").click();
     await expect(page.locator("[data-ui='circuit-b']")).toContainText("SIGNAL OFFLINE");
     await runMatchedFrontHalf(page);
@@ -261,6 +268,7 @@ test.describe("desktop clarity demo", () => {
   });
 
   test("scene two reveals matched H/H work and completes the same full cycle", async ({ page }) => {
+    test.setTimeout(FULL_CYCLE_TIMEOUT_MS);
     await startLevel(page, 2);
     await expect.poll(() => browserState(page)).toMatchObject({ laneBRevealed: true });
     await expect(page.locator("[data-ui='b-marker']")).toHaveText("B");
@@ -276,6 +284,7 @@ test.describe("desktop clarity demo", () => {
   });
 
   test("scene three stages one-sided drops, repeated missed steps, readout recovery, and resynchronization", async ({ page }) => {
+    test.setTimeout(FULL_CYCLE_TIMEOUT_MS);
     await startLevel(page, 3);
     await act(page);
     await move(page, "ArrowLeft", 3);
@@ -325,7 +334,7 @@ test.describe("desktop clarity demo", () => {
   });
 
   test("scene four separates repeated joint faults from physical cryo-lance cooling", async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(COMPLEX_CYCLE_TIMEOUT_MS);
     await startLevel(page, 4);
     await act(page);
     await move(page, "ArrowLeft", 3);
