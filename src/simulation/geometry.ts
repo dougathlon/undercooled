@@ -17,7 +17,7 @@ export const READOUT_BUFFER_POSITION: GridPosition = { x: 4, y: 1 };
 export const MOVEMENT_RISK_POSITION: GridPosition = { x: 2, y: 2 };
 export const RESERVOIR_POSITION: GridPosition = { x: 4, y: 3 };
 export const PUMP_POSITION: GridPosition = { x: 3, y: 3 };
-export const LANCE_RACK_POSITION: GridPosition = { x: 0, y: 3 };
+export const LANCE_RACK_POSITION: GridPosition = { x: 1, y: 3 };
 
 export const SUPPLY_POSITIONS = {
   H: { x: 0, y: 0 },
@@ -54,6 +54,26 @@ export function isBlocked(position: GridPosition): boolean {
 
 export function riskAddress(levelId: number, fixture: string, trigger: TriggerType): string {
   return `L${levelId}/${fixture}/${trigger}`;
+}
+
+export function movementRiskFixture(position: GridPosition): string {
+  return `TRANSFER@${position.x},${position.y}`;
+}
+
+export function movementRiskAddress(levelId: number, position: GridPosition): string {
+  return riskAddress(levelId, movementRiskFixture(position), "movement");
+}
+
+export function movementRiskPositionFromAddress(address: string | undefined): GridPosition | null {
+  if (!address) return null;
+  const match = address.match(/\/TRANSFER@(\d+),(\d+)\/movement$/);
+  if (!match) return address.includes("/TRANSFER/movement") ? { ...MOVEMENT_RISK_POSITION } : null;
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+export function riskFixtureLabel(address: string | undefined): string {
+  const fixture = address?.split("/")[1] ?? "RISK";
+  return fixture.startsWith("TRANSFER@") ? "TRANSFER" : fixture;
 }
 
 export function bufferForFixture(fixture: "pulse" | "couple" | "readout"): GridPosition {

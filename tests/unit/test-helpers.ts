@@ -2,6 +2,7 @@ import {
   PREP_POSITION,
   PULSE_POSITION,
   READOUT_POSITION,
+  SUBMIT_POSITION,
   SUPPLY_POSITIONS,
 } from "../../src/simulation/geometry";
 import { advanceSimulation, dispatchCommand } from "../../src/simulation/simulation";
@@ -52,7 +53,7 @@ export function acceptAndPrepare(state: GameState): void {
   placeBoth(state, READOUT_POSITION, "up");
   pressInteract(state);
   placeBoth(state, PREP_POSITION, "up");
-  holdInteract(state, state.level.heat.preparationHoldMs + 100);
+  holdInteract(state, Math.ceil(state.level.heat.preparationHoldMs / 0.45) + 100);
 }
 
 export function collectExpectedPulse(state: GameState, laneId: LaneId): void {
@@ -64,5 +65,23 @@ export function collectAndInstallNextPulses(state: GameState): void {
   for (const laneId of ["A", "B"] as const) collectExpectedPulse(state, laneId);
   pressInteract(state);
   placeBoth(state, PULSE_POSITION, "up");
+  pressInteract(state);
+}
+
+export function finishJobFromCanister(state: GameState): void {
+  placeBoth(state, SUPPLY_POSITIONS.AUX, "out");
+  pressInteract(state);
+  placeBoth(state, READOUT_POSITION, "up");
+  pressInteract(state);
+  for (let attempt = 0; attempt < 4 && state.currentJob.stage === "run"; attempt += 1) {
+    pressInteract(state);
+  }
+  if (state.currentJob.stage !== "submission") {
+    throw new Error(`Expected a valid shot within four attempts; reached ${state.currentJob.stage}.`);
+  }
+  pressInteract(state);
+  placeBoth(state, SUBMIT_POSITION, "up");
+  pressInteract(state);
+  placeBoth(state, READOUT_POSITION, "up");
   pressInteract(state);
 }

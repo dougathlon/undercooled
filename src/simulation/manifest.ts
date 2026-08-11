@@ -1,4 +1,4 @@
-import { riskAddress } from "./geometry";
+import { MOVEMENT_RISK_POSITION, movementRiskFixture, riskAddress } from "./geometry";
 import type {
   Bit,
   BitPair,
@@ -55,17 +55,18 @@ function makeRiskStream(
   trigger: TriggerType,
   failureRate: number,
   random: () => number,
-  firstBits?: BitPair,
+  scriptedRecords: readonly BitPair[] = [],
 ): RiskStreamState {
   const address = riskAddress(level.id, fixture, trigger);
   const records = Array.from({ length: RISK_STREAM_LENGTH }, (_, sampleIndex): RiskRecord => {
-    const scripted = sampleIndex === 0 && firstBits !== undefined;
+    const scriptedBits = scriptedRecords[sampleIndex];
+    const scripted = scriptedBits !== undefined;
     return {
       id: `${address}/${sampleIndex}`,
       sampleIndex,
       address,
       trigger,
-      bits: scripted ? firstBits : riskBits(random, level.jointProfile, failureRate),
+      bits: scripted ? scriptedBits : riskBits(random, level.jointProfile, failureRate),
       derivation: level.jointProfile === "protected" ? "protected-single" : "prepared-joint",
       source: scripted ? "scripted" : "simulator",
       circuitId: scripted ? `tutorial-${level.id}-${fixture}` : `sim-risk-${level.jointProfile}`,
@@ -94,34 +95,31 @@ export function createManifestBundle(level: LevelConfig, seed = level.id * 9_973
     fixture: string;
     trigger: TriggerType;
     rate: number;
-    first?: BitPair;
+    scripted?: readonly BitPair[];
     enabled: boolean;
   }> = [
     {
       fixture: "PULSE",
       trigger: "interaction",
       rate: level.interactionFailureRate,
-      first: level.features.scriptedPulseFirst,
+      scripted: level.features.scriptedPulseRecords ?? (
+        level.features.scriptedPulseFirst ? [level.features.scriptedPulseFirst] : []
+      ),
       enabled: level.features.interactionRisk,
     },
     {
       fixture: "COUPLE",
       trigger: "interaction",
       rate: level.interactionFailureRate,
+      scripted: level.features.scriptedCoupleRecords,
       enabled: level.features.interactionRisk,
     },
     {
       fixture: "READOUT",
       trigger: "interaction",
       rate: level.interactionFailureRate * 0.55,
+      scripted: level.features.scriptedReadoutRecords,
       enabled: level.features.interactionRisk,
-    },
-    {
-      fixture: "TRANSFER",
-      trigger: "movement",
-      rate: level.movementFailureRate,
-      first: level.features.scriptedMovementFirst,
-      enabled: level.features.movementRisk,
     },
   ];
   for (const fixture of fixtures) {
@@ -132,9 +130,28 @@ export function createManifestBundle(level: LevelConfig, seed = level.id * 9_973
       fixture.trigger,
       fixture.rate,
       random,
-      fixture.first,
+      fixture.scripted,
     );
     riskStreams[stream.address] = stream;
+  }
+  if (level.features.movementRisk) {
+    const fallbackScript = level.features.scriptedMovementRecords ?? (
+      level.features.scriptedMovementFirst ? [level.features.scriptedMovementFirst] : []
+    );
+    const tiles = level.features.movementRiskTiles ?? [
+      { position: MOVEMENT_RISK_POSITION, scriptedRecords: fallbackScript },
+    ];
+    for (const tile of tiles) {
+      const stream = makeRiskStream(
+        level,
+        movementRiskFixture(tile.position),
+        "movement",
+        level.movementFailureRate,
+        random,
+        tile.scriptedRecords ?? fallbackScript,
+      );
+      riskStreams[stream.address] = stream;
+    }
   }
 
   const shotStreams: Record<string, ShotStreamState> = {};

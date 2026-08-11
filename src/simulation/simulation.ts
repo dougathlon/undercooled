@@ -12,11 +12,12 @@ import {
   SUPPLY_POSITIONS,
   bufferForFixture,
   isBlocked,
+  movementRiskAddress,
   moveTarget,
   riskAddress,
   samePosition,
 } from "./geometry";
-import { LEVELS, getLevel, starsForJobs } from "./levels";
+import { LEVELS, getLevel } from "./levels";
 import {
   consumeRisk,
   consumeShot,
@@ -31,6 +32,7 @@ import type {
   GameEvent,
   GameEventType,
   GameState,
+  GridPosition,
   ItemKind,
   ItemState,
   JobDefinition,
@@ -48,7 +50,6 @@ import type {
 import { LANE_IDS } from "./types";
 
 const POSE_DURATION_MS = 620;
-const MOVE_LOCK_MS = 135;
 const THERMAL_REJECTION_THRESHOLD = 75;
 const LANCE_CHARGE_PER_SECOND = 15;
 const RESERVOIR_CELL_CAPACITY = 48;
@@ -119,7 +120,7 @@ function createLane(): LaneState {
       heldItemId: null,
       pose: "idle",
       poseUntilMs: 0,
-      lastMoveAtMs: -MOVE_LOCK_MS,
+      lastMoveAtMs: -1,
     },
     job: createLaneJobState(),
     replacementKind: null,
@@ -151,14 +152,16 @@ function thermalBand(load: number): ThermalBand {
 }
 
 export function createGameState(levelId: number, seed?: number): GameState {
-  const level = getLevel(levelId);
+  // A run owns its configuration snapshot. Tests, imported manifests, and
+  // future modes may safely specialize it without mutating the canonical menu.
+  const level = structuredClone(getLevel(levelId));
   const manifestSeed = seed ?? level.manifestSeed ?? levelId * 10_007;
   const hotspots = LANE_IDS.flatMap((laneId) => {
     const primary = {
       id: `${laneId}-manifold-1`,
       lane: laneId,
       position: { x: 4, y: 1 },
-      heat: 16,
+      heat: level.demo.initialHotspotHeat,
       active: true,
       blockedLine: level.features.blockedLines && laneId === "B",
     };
@@ -169,14 +172,14 @@ export function createGameState(levelId: number, seed?: number): GameState {
         id: `${laneId}-manifold-2`,
         lane: laneId,
         position: { x: 4, y: 2 },
-        heat: 12,
+        heat: Math.max(12, level.demo.initialHotspotHeat - 10),
         active: true,
         blockedLine: level.features.blockedLines && laneId === "A",
       },
     ];
   });
 
-  return {
+  const state: GameState = {
     format: "undercooled-state-v2",
     phase: "briefing",
     level,
@@ -194,13 +197,13 @@ export function createGameState(levelId: number, seed?: number): GameState {
     items: {},
     manifest: createManifestBundle(level, manifestSeed),
     cooling: {
-      load: 12,
+      load: level.demo.initialHeat,
       band: "nominal",
       reservoir: { A: 100, B: 100 },
       pumpTripped: { A: false, B: false },
       hotspots,
       completedServices: 0,
-      alarmed: false,
+      alarmed: level.demo.showHeat && level.demo.initialHeat >= 60,
     },
     score: {
       acceptedJobs: 0,
@@ -221,6 +224,7 @@ export function createGameState(levelId: number, seed?: number): GameState {
     nextEventId: 1,
     events: [],
   };
+  return state;
 }
 
 function addEvent(
@@ -298,7 +302,7 @@ function setStage(state: GameState, stage: JobStage): void {
 
 function topCounterReady(state: GameState, laneId: LaneId, position: { x: number; y: number }): boolean {
   const actor = state.lanes[laneId].actor;
-  return samePosition(actor.position, position) && actor.facing === "up";
+  return samePosition(actor.position, position);
 }
 
 function droppedAtActor(state: GameState, laneId: LaneId): ItemState | null {
@@ -335,12 +339,12 @@ function replacementAtSupply(state: GameState, laneId: LaneId): ItemKind | null 
   const actor = state.lanes[laneId].actor;
   if (replacement.startsWith("pulse-")) {
     const pulse = itemPulse(replacement);
-    if (pulse && samePosition(actor.position, SUPPLY_POSITIONS[pulse]) && actor.facing === "out") {
+    if (pulse && samePosition(actor.position, SUPPLY_POSITIONS[pulse])) {
       return replacement;
     }
     return null;
   }
-  if (samePosition(actor.position, SUPPLY_POSITIONS.AUX) && actor.facing === "out") {
+  if (samePosition(actor.position, SUPPLY_POSITIONS.AUX)) {
     return replacement;
   }
   return null;
@@ -353,17 +357,26 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
   const dropped = droppedAtActor(state, laneId);
   if (dropped) return { kind: "pickup-dropped", itemId: dropped.id };
 
+  const jointCoolingPending =
+    state.level.demo.lesson === "joint-risk" &&
+    hasEvent(state, "coupling-armed") &&
+    state.cooling.hotspots.some((hotspot) => hotspot.active);
+
   if (item?.kind === "cryo-lance") {
-    if (samePosition(actor.position, LANCE_RACK_POSITION) && actor.facing === "down") {
-      return { kind: "return-lance" };
+    if (samePosition(actor.position, LANCE_RACK_POSITION)) {
+      const peerNeedsLance = LANE_IDS.some((candidateLaneId) => {
+        if (candidateLaneId === laneId) return false;
+        const peerItem = heldItem(state, candidateLaneId);
+        return peerItem?.kind !== "cryo-lance";
+      });
+      return jointCoolingPending && peerNeedsLance ? { kind: "noop" } : { kind: "return-lance" };
     }
     return { kind: "spray" };
   }
 
   if (
     item?.kind === "coolant-cell" &&
-    samePosition(actor.position, RESERVOIR_POSITION) &&
-    actor.facing === "in"
+    samePosition(actor.position, RESERVOIR_POSITION)
   ) {
     return { kind: "install-coolant" };
   }
@@ -371,13 +384,12 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
   if (
     item === null &&
     samePosition(actor.position, PUMP_POSITION) &&
-    actor.facing === "down" &&
     state.cooling.pumpTripped[laneId]
   ) {
     return { kind: "pump" };
   }
 
-  if (item === null && samePosition(actor.position, LANCE_RACK_POSITION) && actor.facing === "down") {
+  if (item === null && jointCoolingPending && samePosition(actor.position, LANCE_RACK_POSITION)) {
     return { kind: "pickup-lance" };
   }
 
@@ -398,7 +410,7 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
     if (itemPulse(item?.kind ?? "empty-canister") && topCounterReady(state, laneId, PULSE_POSITION)) {
       return { kind: "install-pulse" };
     }
-    if (item === null && actor.facing === "out") {
+    if (item === null) {
       const expected = job.definition.pulses[laneId][lane.job.loadedPulses.length];
       const expectedItemAlreadyExists = Object.values(state.items).some(
         (candidate) =>
@@ -424,7 +436,6 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
     if (
       item === null &&
       samePosition(actor.position, SUPPLY_POSITIONS.AUX) &&
-      actor.facing === "out" &&
       !lane.job.couplingInstalled
     ) {
       return { kind: "pickup-aux", itemKind: "coupling-half" };
@@ -440,8 +451,7 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
     if (
       laneId === job.definition.courierLane &&
       item === null &&
-      samePosition(actor.position, SUPPLY_POSITIONS.AUX) &&
-      actor.facing === "out"
+      samePosition(actor.position, SUPPLY_POSITIONS.AUX)
     ) {
       return { kind: "pickup-aux", itemKind: "empty-canister" };
     }
@@ -466,6 +476,14 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
     return { kind: "reset" };
   }
 
+  if (
+    item === null &&
+    state.cooling.band !== "nominal" &&
+    samePosition(actor.position, LANCE_RACK_POSITION)
+  ) {
+    return { kind: "pickup-lance" };
+  }
+
   if (state.level.features.allowPrestage && (job.stage === "run" || job.stage === "submission")) {
     const upcoming = nextJob(state);
     const firstPulse = upcoming.pulses[laneId][0];
@@ -479,7 +497,6 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
     }
     if (
       item === null &&
-      actor.facing === "out" &&
       !hasPrestageItem(state, laneId, upcoming.id) &&
       samePosition(actor.position, SUPPLY_POSITIONS[firstPulse])
     ) {
@@ -490,7 +507,6 @@ function interactionIntent(state: GameState, laneId: LaneId): InteractionIntent 
   if (
     item === null &&
     samePosition(actor.position, SUPPLY_POSITIONS.AUX) &&
-    actor.facing === "out" &&
     state.cooling.reservoir[laneId] < 65
   ) {
     return { kind: "pickup-aux", itemKind: "coolant-cell" };
@@ -518,7 +534,6 @@ function returnLance(state: GameState, laneId: LaneId): void {
   const item = heldItem(state, laneId);
   if (item?.kind !== "cryo-lance") return;
   discardItem(state, item);
-  state.cooling.completedServices += 1;
   setPose(state, laneId, "success");
   addEvent(state, "item-returned", `Channel ${laneId} returned the cryo lance for recharge.`, {
     lane: laneId,
@@ -1018,9 +1033,10 @@ function processInteraction(state: GameState): void {
 
 function consumeMovementRisk(
   state: GameState,
+  position: GridPosition,
   participants: LaneId[],
 ): RiskRecord | null {
-  const address = riskAddress(state.level.id, "TRANSFER", "movement");
+  const address = movementRiskAddress(state.level.id, position);
   const record = consumeRisk(state.manifest, address);
   if (record) {
     addEvent(state, "risk-consumed", `${record.source.toUpperCase()} transfer ${record.sampleIndex}: ${record.bits.join("")}.`, {
@@ -1040,28 +1056,45 @@ function processMove(state: GameState, direction: Direction): void {
     B: moveTarget(state.lanes.B.actor.position, direction),
   };
   const legal: Record<LaneId, boolean> = { A: false, B: false };
-  const riskEligible: LaneId[] = [];
+  const riskGroups = new Map<string, { position: GridPosition; participants: LaneId[] }>();
+  const configuredRiskTiles = state.level.features.movementRiskTiles ?? [
+    { position: MOVEMENT_RISK_POSITION },
+  ];
 
   for (const laneId of LANE_IDS) {
     const actor = state.lanes[laneId].actor;
     actor.facing = direction;
-    if (state.simTimeMs - actor.lastMoveAtMs < MOVE_LOCK_MS) continue;
     actor.lastMoveAtMs = state.simTimeMs;
     legal[laneId] = !isBlocked(targets[laneId]);
     if (!legal[laneId]) {
       addEvent(state, "local-collision", `Channel ${laneId} met its stopping bay.`, { lane: laneId });
       continue;
     }
-    if (state.level.features.movementRisk && samePosition(actor.position, MOVEMENT_RISK_POSITION)) {
-      riskEligible.push(laneId);
+    const riskTile = state.level.features.movementRisk
+      ? configuredRiskTiles.find((tile) => samePosition(actor.position, tile.position))
+      : undefined;
+    if (riskTile) {
+      const address = movementRiskAddress(state.level.id, riskTile.position);
+      const group = riskGroups.get(address) ?? {
+        position: riskTile.position,
+        participants: [],
+      };
+      group.participants.push(laneId);
+      riskGroups.set(address, group);
     }
   }
 
-  const risk = riskEligible.length > 0 ? consumeMovementRisk(state, riskEligible) : null;
+  const risksByLane: Partial<Record<LaneId, RiskRecord>> = {};
+  for (const group of riskGroups.values()) {
+    const record = consumeMovementRisk(state, group.position, group.participants);
+    if (!record) continue;
+    for (const laneId of group.participants) risksByLane[laneId] = record;
+  }
   for (const laneId of LANE_IDS) {
     if (!legal[laneId]) continue;
     const lane = state.lanes[laneId];
-    const missed = risk !== null && riskEligible.includes(laneId) && laneBit(risk.bits, laneId) === 1;
+    const risk = risksByLane[laneId] ?? null;
+    const missed = risk !== null && laneBit(risk.bits, laneId) === 1;
     if (missed && lane.job.consecutiveFailures < CLASSICAL_BYPASS_AFTER) {
       lane.job.consecutiveFailures += 1;
       setPose(state, laneId, "missed", 720);
@@ -1085,16 +1118,21 @@ function processMove(state: GameState, direction: Direction): void {
   }
 }
 
+function hasEvent(state: GameState, type: GameEventType): boolean {
+  return state.events.some((event) => event.type === type);
+}
+
 function completeLevel(state: GameState, eventType: "level-completed" | "level-failed"): void {
   if (state.phase === "complete") return;
   state.phase = "complete";
   state.interactHeld = false;
   state.activeHoldLanes = [];
-  const stars = starsForJobs(state.level, state.score.acceptedJobs);
   addEvent(
     state,
     eventType,
-    stars > 0 ? `Shift complete: ${state.score.acceptedJobs} paired jobs, ${stars} star${stars === 1 ? "" : "s"}.` : "Shift ended below the job threshold.",
+    eventType === "level-completed"
+      ? `Demonstration ${state.level.id} complete.`
+      : "Demonstration ended before its learning goal was met.",
   );
 }
 
@@ -1132,7 +1170,11 @@ export function dispatchCommand(state: GameState, command: SimulationCommand): G
   }
   if (state.phase !== "running") return state;
 
-  if (command.type === "move") processMove(state, command.direction);
+  if (command.type === "move") {
+    state.interactHeld = false;
+    state.activeHoldLanes = [];
+    processMove(state, command.direction);
+  }
   if (command.type === "interact-down") {
     state.interactHeld = true;
     processInteraction(state);
@@ -1185,8 +1227,7 @@ function updatePumpHolds(state: GameState, deltaMs: number): void {
       !state.activeHoldLanes.includes(laneId) ||
       !state.cooling.pumpTripped[laneId] ||
       heldItem(state, laneId) !== null ||
-      !samePosition(actor.position, PUMP_POSITION) ||
-      actor.facing !== "down"
+      !samePosition(actor.position, PUMP_POSITION)
     ) {
       continue;
     }
@@ -1211,7 +1252,7 @@ function updateSpray(state: GameState, deltaMs: number): void {
     if (!state.activeHoldLanes.includes(laneId)) continue;
     const actor = state.lanes[laneId].actor;
     const lance = heldItem(state, laneId);
-    if (lance?.kind !== "cryo-lance" || (lance.charge ?? 0) <= 0 || actor.facing !== "in") continue;
+    if (lance?.kind !== "cryo-lance" || (lance.charge ?? 0) <= 0) continue;
     const target = state.cooling.hotspots.find(
       (hotspot) =>
         hotspot.lane === laneId &&
@@ -1220,6 +1261,7 @@ function updateSpray(state: GameState, deltaMs: number): void {
         actor.position.x >= 3,
     );
     if (!target) continue;
+    actor.facing = "in";
     const seconds = deltaMs / 1_000;
     const effectiveness = target.blockedLine ? 0.45 : 1;
     const reduction = state.level.heat.coolingPerSecond * seconds * effectiveness;
@@ -1232,6 +1274,12 @@ function updateSpray(state: GameState, deltaMs: number): void {
       target.blockedLine = false;
       state.cooling.completedServices += 1;
       addEvent(state, "cooling-completed", `Channel ${laneId} cleared a blocked coolant line.`, {
+        lane: laneId,
+      });
+    } else if (target.active && target.heat <= 18) {
+      target.active = false;
+      state.cooling.completedServices += 1;
+      addEvent(state, "cooling-completed", `Channel ${laneId} stabilized its external manifold.`, {
         lane: laneId,
       });
     }
@@ -1364,10 +1412,7 @@ export function advanceSimulation(state: GameState, deltaMs: number): GameState 
   resetExpiredPoses(state);
 
   if (state.phase === "running" && state.shiftRemainingMs === 0) {
-    completeLevel(
-      state,
-      starsForJobs(state.level, state.score.acceptedJobs) > 0 ? "level-completed" : "level-failed",
-    );
+    completeLevel(state, "level-failed");
   }
   return state;
 }

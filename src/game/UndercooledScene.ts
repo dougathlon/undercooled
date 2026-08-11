@@ -12,6 +12,7 @@ import {
   READOUT_POSITION,
   RESERVOIR_POSITION,
   SUPPLY_POSITIONS,
+  movementRiskPositionFromAddress,
 } from "../simulation/geometry";
 import type {
   ActorPose,
@@ -26,7 +27,9 @@ import type {
 } from "../simulation/types";
 import { LANE_IDS } from "../simulation/types";
 import type { GameSession } from "./GameSession";
-import { STAGE_STATION_INDEX, STATIONS } from "./presentationContract";
+import { guidanceFor } from "./guidance";
+import { STATIONS } from "./presentationContract";
+import { quantumBlurPresentation } from "./quantumBlur";
 import {
   GRID_COLUMNS,
   GRID_ROWS,
@@ -100,6 +103,7 @@ export class UndercooledScene extends Phaser.Scene {
   private lanceItemSprites!: Record<LaneId, Phaser.GameObjects.Image>;
   private actors!: Record<LaneId, Phaser.GameObjects.Image>;
   private shadows!: Record<LaneId, Phaser.GameObjects.Ellipse>;
+  private guideLabels!: Record<LaneId, Phaser.GameObjects.Text>;
   private renderedState: GameState | null = null;
   private renderedLevelId = 0;
   private lastEventId = 0;
@@ -156,7 +160,7 @@ export class UndercooledScene extends Phaser.Scene {
       .setStrokeStyle(3, COLORS.gold, 0.45)
       .setDepth(80);
     this.laneBVeilText = this.add
-      .text(1_220, 560, "CHANNEL B\nSIGNAL OCCLUDED", {
+      .text(1_220, 560, "REMOTE SERVICE BAY\nSIGNAL UNAVAILABLE", {
         fontFamily: "Arial Black, Arial, sans-serif",
         fontSize: "24px",
         align: "center",
@@ -167,6 +171,11 @@ export class UndercooledScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
       .setDepth(81);
+
+    this.guideLabels = {
+      A: this.createGuideLabel(COLORS.laneA),
+      B: this.createGuideLabel(COLORS.laneB),
+    };
 
     this.shadows = {
       A: this.add.ellipse(0, 0, 108, 30, 0x000000, 0.62).setDepth(68),
@@ -210,6 +219,23 @@ export class UndercooledScene extends Phaser.Scene {
     graphics.fillCircle(4, 4, 4);
     graphics.generateTexture("gold-spark", 8, 8);
     graphics.destroy();
+  }
+
+  private createGuideLabel(color: number): Phaser.GameObjects.Text {
+    return this.add
+      .text(0, 0, "", {
+        fontFamily: "Arial Black, Arial, sans-serif",
+        fontSize: "15px",
+        color: "#fffdf4",
+        backgroundColor: `#${color.toString(16).padStart(6, "0")}`,
+        stroke: "#102127",
+        strokeThickness: 4,
+        padding: { x: 9, y: 5 },
+        align: "center",
+      })
+      .setOrigin(0.5)
+      .setDepth(108)
+      .setVisible(false);
   }
 
   private createStationText(): void {
@@ -509,22 +535,27 @@ export class UndercooledScene extends Phaser.Scene {
       }
     }
     if (state.level.features.movementRisk) {
-      const point = gridToWorld(laneId, MOVEMENT_RISK_POSITION);
-      const color = protectedLane ? COLORS.accepted : COLORS.cyan;
-      this.staticLayer.fillStyle(color, protectedLane ? 0.08 : 0.17);
-      this.staticLayer.fillRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
-      this.staticLayer.lineStyle(protectedLane ? 3 : 5, color, protectedLane ? 0.62 : 0.9);
-      this.staticLayer.strokeRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
-      if (protectedLane) {
-        this.drawProtectedAddressGlyph(point.x, point.y);
-      } else {
-        for (let offset = -22; offset <= 22; offset += 22) {
-          this.staticLayer.lineStyle(3, COLORS.frost, 0.72);
-          this.staticLayer.beginPath();
-          this.staticLayer.moveTo(point.x + offset - 9, point.y + 8);
-          this.staticLayer.lineTo(point.x + offset, point.y - 8);
-          this.staticLayer.lineTo(point.x + offset + 9, point.y + 8);
-          this.staticLayer.strokePath();
+      const positions = state.level.features.movementRiskTiles?.map((tile) => tile.position) ?? [
+        MOVEMENT_RISK_POSITION,
+      ];
+      for (const position of positions) {
+        const point = gridToWorld(laneId, position);
+        const color = protectedLane ? COLORS.accepted : COLORS.cyan;
+        this.staticLayer.fillStyle(color, protectedLane ? 0.08 : 0.17);
+        this.staticLayer.fillRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
+        this.staticLayer.lineStyle(protectedLane ? 3 : 5, color, protectedLane ? 0.62 : 0.9);
+        this.staticLayer.strokeRoundedRect(point.x - 45, point.y - 38, 90, 76, 9);
+        if (protectedLane) {
+          this.drawProtectedAddressGlyph(point.x, point.y);
+        } else {
+          for (let offset = -22; offset <= 22; offset += 22) {
+            this.staticLayer.lineStyle(3, COLORS.frost, 0.72);
+            this.staticLayer.beginPath();
+            this.staticLayer.moveTo(point.x + offset - 9, point.y + 8);
+            this.staticLayer.lineTo(point.x + offset, point.y - 8);
+            this.staticLayer.lineTo(point.x + offset + 9, point.y + 8);
+            this.staticLayer.strokePath();
+          }
         }
       }
     }
@@ -598,24 +629,33 @@ export class UndercooledScene extends Phaser.Scene {
         : 1,
     );
 
+    const quantumBlur = quantumBlurPresentation(state);
+    this.game.canvas.dataset.quantumBlur = quantumBlur.active ? "simulated" : "off";
+    this.game.canvas.style.setProperty("--uc-quantum-blur", `${quantumBlur.blurPixels.toFixed(2)}px`);
+    this.game.canvas.style.setProperty("--uc-quantum-saturation", quantumBlur.saturation.toFixed(3));
+
     this.syncStationText(state);
     this.syncSupplySprites(state);
     this.drawDynamicState(state);
   }
 
   private syncStationText(state: GameState): void {
-    const activeStation = STAGE_STATION_INDEX[state.currentJob.stage];
+    const guide = guidanceFor(state);
     for (const laneId of LANE_IDS) {
+      const target = guide.targets[laneId];
+      const activeStation = guide.focus === "station" && target?.position.y === 0
+        ? target.position.x
+        : -1;
       for (let index = 0; index < this.stationTexts[laneId].length; index += 1) {
         const active = index === activeStation;
         this.stationTexts[laneId][index]
           .setText(STATIONS[index].label)
           .setColor(active ? "#ffffff" : "#f7e8c7")
-          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.82)
-          .setScale(active ? 1.07 : 1);
+          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.54)
+          .setScale(active ? 1.12 : 0.96);
         this.stationProps[laneId][index]
-          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.9)
-          .setScale(active ? 0.45 : 0.42);
+          .setAlpha(laneId === "B" && !state.laneBRevealed ? 0 : active ? 1 : 0.57)
+          .setScale(active ? 0.48 : 0.4);
       }
     }
   }
@@ -745,6 +785,7 @@ export class UndercooledScene extends Phaser.Scene {
     this.stateLayer.clear();
     this.drawSupplyCues(state);
     this.drawStageHighlight(state);
+    this.drawGuidanceTargets(state);
     for (const laneId of LANE_IDS) {
       if (laneId === "B" && !state.laneBRevealed) continue;
       this.drawLaneJobState(state, laneId);
@@ -805,10 +846,14 @@ export class UndercooledScene extends Phaser.Scene {
   }
 
   private drawStageHighlight(state: GameState): void {
-    const station = STAGE_STATION_INDEX[state.currentJob.stage];
+    const guide = guidanceFor(state);
+    if (guide.focus !== "station") return;
     const pulse = 0.65 + Math.sin(state.simTimeMs / 180) * 0.24;
     for (const laneId of LANE_IDS) {
       if (laneId === "B" && !state.laneBRevealed) continue;
+      const target = guide.targets[laneId];
+      if (!target || target.position.y !== 0) continue;
+      const station = target.position.x;
       const counter = counterToWorld(laneId, station);
       const floor = gridToWorld(laneId, { x: station, y: 0 });
       const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
@@ -819,26 +864,94 @@ export class UndercooledScene extends Phaser.Scene {
     }
   }
 
+  private drawGuidanceTargets(state: GameState): void {
+    const guide = guidanceFor(state);
+    const visible = state.phase === "running";
+    const pulse = 0.68 + (Math.sin(state.simTimeMs / 150) + 1) * 0.14;
+
+    for (const laneId of LANE_IDS) {
+      const target = guide.targets[laneId];
+      const obscured = laneId === "B" && !state.laneBRevealed;
+      const label = this.guideLabels[laneId];
+      if (!visible || obscured || !target) {
+        label.setVisible(false);
+        continue;
+      }
+
+      const actorPoint = gridToWorld(laneId, state.lanes[laneId].actor.position);
+      const targetPoint = gridToWorld(laneId, target.position);
+      const laneColor = laneId === "A" ? COLORS.laneA : COLORS.laneB;
+      const targetColor = guide.urgent ? COLORS.alarm : COLORS.cyan;
+
+      if (
+        state.lanes[laneId].actor.position.x !== target.position.x ||
+        state.lanes[laneId].actor.position.y !== target.position.y
+      ) {
+        const cornerX = targetPoint.x;
+        const cornerY = actorPoint.y;
+        this.stateLayer.lineStyle(8, laneColor, 0.13);
+        this.stateLayer.beginPath();
+        this.stateLayer.moveTo(actorPoint.x, actorPoint.y);
+        this.stateLayer.lineTo(cornerX, cornerY);
+        this.stateLayer.lineTo(targetPoint.x, targetPoint.y);
+        this.stateLayer.strokePath();
+        this.stateLayer.lineStyle(3, COLORS.whiteGold, 0.58);
+        this.stateLayer.beginPath();
+        this.stateLayer.moveTo(actorPoint.x, actorPoint.y);
+        this.stateLayer.lineTo(cornerX, cornerY);
+        this.stateLayer.lineTo(targetPoint.x, targetPoint.y);
+        this.stateLayer.strokePath();
+      }
+
+      this.stateLayer.fillStyle(targetColor, 0.1 + pulse * 0.08);
+      this.stateLayer.fillRoundedRect(targetPoint.x - 48, targetPoint.y - 41, 96, 82, 10);
+      this.stateLayer.lineStyle(7, targetColor, pulse);
+      this.stateLayer.strokeRoundedRect(targetPoint.x - 48, targetPoint.y - 41, 96, 82, 10);
+      this.stateLayer.fillStyle(COLORS.whiteGold, pulse);
+      this.stateLayer.fillTriangle(
+        targetPoint.x - 13,
+        targetPoint.y - 55,
+        targetPoint.x + 13,
+        targetPoint.y - 55,
+        targetPoint.x,
+        targetPoint.y - 41,
+      );
+
+      let labelX = targetPoint.x;
+      if (guide.focus === "supply" && target.position.x === 0) {
+        labelX = supplyToWorld(laneId, target.position.y).x;
+      } else if (guide.focus === "cooling" && guide.headline.includes("LANCE")) {
+        labelX += laneId === "A" ? 34 : -34;
+      }
+      const labelY = target.position.y >= 2 ? targetPoint.y - 60 : targetPoint.y + 56;
+      label
+        .setText(target.label)
+        .setPosition(labelX, labelY)
+        .setVisible(true)
+        .setAlpha(pulse)
+        .setScale(guide.urgent ? 1.06 : 1);
+    }
+  }
+
   private drawLaneJobState(state: GameState, laneId: LaneId): void {
     const lane = state.lanes[laneId];
     const prep = counterToWorld(laneId, PREP_POSITION.x);
     const couple = counterToWorld(laneId, COUPLE_POSITION.x);
     const readout = counterToWorld(laneId, READOUT_POSITION.x);
 
-    if (lane.job.prepared || lane.job.preparationProgressMs > 0) {
-      const progress = lane.job.prepared
-        ? 1
-        : Phaser.Math.Clamp(
-            lane.job.preparationProgressMs / Math.max(1, state.level.heat.preparationHoldMs),
-            0,
-            1,
-          );
-      this.drawProgressArc(prep.x, prep.y - 72, 34, progress, lane.job.prepared ? COLORS.accepted : COLORS.cyan);
+    if (lane.job.prepared) {
+      this.drawCompletionCheck(prep.x, prep.y - 72);
+    } else if (lane.job.preparationProgressMs > 0) {
+      const progress = Phaser.Math.Clamp(
+        lane.job.preparationProgressMs / Math.max(1, state.level.heat.preparationHoldMs),
+        0,
+        1,
+      );
+      this.drawProgressArc(prep.x, prep.y - 72, 34, progress, COLORS.cyan);
     }
 
     if (lane.job.couplingArmedAtMs !== null) {
-      this.stateLayer.lineStyle(4, COLORS.accepted, 0.9);
-      this.stateLayer.strokeCircle(couple.x, couple.y - 72, 25);
+      this.drawCompletionCheck(couple.x, couple.y - 72);
     }
     if (lane.job.resetArmed) {
       this.stateLayer.lineStyle(5, COLORS.cyan, 0.92);
@@ -1111,6 +1224,15 @@ export class UndercooledScene extends Phaser.Scene {
     this.stateLayer.strokePath();
   }
 
+  private drawCompletionCheck(x: number, y: number): void {
+    this.stateLayer.fillStyle(COLORS.void, 0.78);
+    this.stateLayer.fillCircle(x, y, 17);
+    this.stateLayer.lineStyle(3, COLORS.accepted, 0.88);
+    this.stateLayer.strokeCircle(x, y, 17);
+    this.stateLayer.lineBetween(x - 7, y, x - 1, y + 6);
+    this.stateLayer.lineBetween(x - 1, y + 6, x + 9, y - 7);
+  }
+
   private consumePresentationEvents(state: GameState): void {
     const events = state.events.filter((event) => event.id > this.lastEventId);
     for (const event of events) this.presentEvent(event);
@@ -1192,7 +1314,8 @@ export class UndercooledScene extends Phaser.Scene {
     if (address?.includes("PULSE")) return PULSE_POSITION;
     if (address?.includes("COUPLE")) return COUPLE_POSITION;
     if (address?.includes("READOUT")) return READOUT_POSITION;
-    if (address?.includes("TRANSFER") || address?.includes("movement")) return MOVEMENT_RISK_POSITION;
+    const movementPosition = movementRiskPositionFromAddress(address);
+    if (movementPosition) return movementPosition;
     return PULSE_POSITION;
   }
 

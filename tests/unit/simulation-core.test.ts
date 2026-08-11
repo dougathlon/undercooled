@@ -4,7 +4,7 @@ import {
   MOVEMENT_RISK_POSITION,
   READOUT_POSITION,
   gridToWorld,
-  riskAddress,
+  movementRiskAddress,
 } from "../../src/simulation/geometry";
 import {
   createGameState,
@@ -23,11 +23,11 @@ describe("deterministic v2 simulation", () => {
       { atMs: 200, command: { type: "move", direction: "out" } },
       { atMs: 400, command: { type: "move", direction: "down" } },
       { atMs: 600, command: { type: "move", direction: "down" } },
-      { atMs: 800, command: { type: "move", direction: "out" } },
+      { atMs: 800, command: { type: "move", direction: "up" } },
     ];
     const first = replay(3, 867_5309, log);
     const second = replay(3, 867_5309, log);
-    const address = riskAddress(3, "TRANSFER", "movement");
+    const address = movementRiskAddress(3, MOVEMENT_RISK_POSITION);
 
     expect(serializeState(first)).toBe(serializeState(second));
     expect(first.manifest.riskStreams[address].cursor).toBe(1);
@@ -73,7 +73,7 @@ describe("deterministic v2 simulation", () => {
 
   it("consumes movement risk on every eligible departure, not once per tile", () => {
     const state = start(createGameState(3, 1234));
-    const address = riskAddress(3, "TRANSFER", "movement");
+    const address = movementRiskAddress(3, MOVEMENT_RISK_POSITION);
     state.manifest.riskStreams[address].records[0].bits = [0, 0];
     state.manifest.riskStreams[address].records[1].bits = [0, 0];
 
@@ -87,8 +87,22 @@ describe("deterministic v2 simulation", () => {
     expect(state.events.filter((event) => event.type === "risk-consumed")).toHaveLength(2);
   });
 
+  it("keeps each movement square on an independent coordinate-bound cursor", () => {
+    const state = start(createGameState(3, 1234));
+    const tiles = state.level.features.movementRiskTiles ?? [];
+    const addresses = tiles.map((tile) => movementRiskAddress(3, tile.position));
+    for (const address of addresses) state.manifest.riskStreams[address].records[0].bits = [0, 0];
+
+    placeBoth(state, tiles[0].position, "up");
+    dispatchCommand(state, { type: "move", direction: "up" });
+    placeBoth(state, tiles[1].position, "up");
+    dispatchCommand(state, { type: "move", direction: "up" });
+
+    expect(addresses.map((address) => state.manifest.riskStreams[address].cursor)).toEqual([1, 1, 0]);
+  });
+
   it("keeps a no-op readout press from consuming either manifest stream", () => {
-    const state = start(createGameState(3));
+    const state = start(createGameState(1));
     placeBoth(state, READOUT_POSITION, "up");
     const before = structuredClone(state.manifest);
     dispatchCommand(state, { type: "interact-down" });

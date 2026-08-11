@@ -2,8 +2,8 @@ import type { HeatProfile, JobDefinition, LevelConfig, PulseKind } from "./types
 
 const THERMAL_DEMO: HeatProfile = {
   maximum: 100,
-  baselinePerSecond: 0.08,
-  activeJobPerSecond: 0.16,
+  baselinePerSecond: 0,
+  activeJobPerSecond: 0,
   executionImpulse: 2.8,
   fumbleImpulse: 2,
   expiryImpulse: 4,
@@ -16,8 +16,8 @@ const THERMAL_DEMO: HeatProfile = {
 
 const THERMAL_LATER_GAME: HeatProfile = {
   ...THERMAL_DEMO,
-  baselinePerSecond: 0.28,
-  activeJobPerSecond: 0.54,
+  baselinePerSecond: 0.12,
+  activeJobPerSecond: 0.25,
   executionImpulse: 4.5,
   fumbleImpulse: 3,
   coolingPerSecond: 21,
@@ -80,6 +80,12 @@ export const LEVELS: readonly LevelConfig[] = [
     interactionFailureRate: 0,
     movementFailureRate: 0,
     jointProfile: "protected",
+    demo: {
+      lesson: "hidden-pair",
+      showHeat: false,
+      initialHeat: 12,
+      initialHotspotHeat: 16,
+    },
     features: {
       laneBPresentation: "veiled",
       interactionRisk: false,
@@ -100,9 +106,9 @@ export const LEVELS: readonly LevelConfig[] = [
     id: 2,
     slug: "revealed-pair",
     title: "The Other Pair",
-    subtitle: "The same controls; different local work",
+    subtitle: "The same controls; the same service routine",
     briefing:
-      "Channel B is revealed. One shared input moves the workers in mirrored screen directions, while contextual actions let A fetch H and B fetch X.",
+      "Channel B is revealed. One shared input moves both workers through matching service positions, where each collects and installs the same H cartridge.",
     objective: "Complete one deterministic paired service cycle with both workers visible.",
     durationMs: null,
     dropLifetimeMs: 9_000,
@@ -110,6 +116,12 @@ export const LEVELS: readonly LevelConfig[] = [
     interactionFailureRate: 0,
     movementFailureRate: 0,
     jointProfile: "protected",
+    demo: {
+      lesson: "synchronous-pair",
+      showHeat: false,
+      initialHeat: 12,
+      initialHotspotHeat: 16,
+    },
     features: {
       laneBPresentation: "reveal-on-start",
       interactionRisk: false,
@@ -125,7 +137,7 @@ export const LEVELS: readonly LevelConfig[] = [
     },
     heat: THERMAL_DEMO,
     jobs: [
-      demoJob({ levelId: 2, label: "Asymmetric Pulse Check", left: ["H"], right: ["X"], courierLane: "B" }),
+      demoJob({ levelId: 2, label: "Synchronous Pulse Check", left: ["H"], right: ["H"], courierLane: "B" }),
     ],
   }),
   demoLevel({
@@ -134,15 +146,23 @@ export const LEVELS: readonly LevelConfig[] = [
     title: "Protected Risk",
     subtitle: "Quantum-derived faults enter Channel B",
     briefing:
-      "A remains protected. The first scripted demonstration record drops B's cartridge; later prefetched simulator records can make B miss a transfer step.",
-    objective: "Recover B's drop, resynchronize at the stopping rail, then finish and reset one cycle.",
+      "Complete the same service cycle. A remains protected while hidden records can disrupt B at the pulse bay and any marked movement address; recover, realign, then finish the job.",
+    objective: "Complete the full paired service cycle while recovering the protected action and movement faults.",
     durationMs: null,
     dropLifetimeMs: 9_000,
     couplingWindowMs: 2_150,
     interactionFailureRate: 0.32,
     movementFailureRate: 0.32,
     jointProfile: "protected",
-    manifestSeed: 31,
+    // This simulator seed prefetches 01, 01, 00 at the central transfer tile;
+    // the stopping rail makes the two delayed steps recoverable.
+    manifestSeed: 205,
+    demo: {
+      lesson: "protected-risk",
+      showHeat: false,
+      initialHeat: 12,
+      initialHotspotHeat: 16,
+    },
     features: {
       laneBPresentation: "visible",
       interactionRisk: true,
@@ -152,6 +172,13 @@ export const LEVELS: readonly LevelConfig[] = [
       allowPrestage: false,
       usefulOffset: true,
       scriptedPulseFirst: [0, 1],
+      scriptedPulseRecords: [[0, 1], [0, 0]],
+      scriptedReadoutRecords: [[0, 0], [0, 1], [0, 0]],
+      movementRiskTiles: [
+        { position: { x: 1, y: 2 } },
+        { position: { x: 2, y: 2 } },
+        { position: { x: 3, y: 2 } },
+      ],
       dropExpiryEnabled: false,
       pumpTrips: false,
       blockedLines: false,
@@ -162,8 +189,8 @@ export const LEVELS: readonly LevelConfig[] = [
       demoJob({
         levelId: 3,
         label: "Protected Transfer",
-        left: ["H", "P"],
-        right: ["X", "H"],
+        left: ["H"],
+        right: ["H"],
         courierLane: "A",
       }),
     ],
@@ -172,17 +199,25 @@ export const LEVELS: readonly LevelConfig[] = [
     id: 4,
     slug: "joint-risk",
     title: "Joint Risk",
-    subtitle: "No protected side; later-game pressure",
+    subtitle: "No protected side; coupled failure and physical cooling",
     briefing:
-      "Prepared joint risk records can now affect A, B, or both. A coupled gate, expiring drops, transfer misses, and rising thermal load make this the busy later-game demonstration.",
-    objective: "Complete a coupled cycle while recovering bilateral faults and maintaining the external cooling plant.",
-    durationMs: 140_000,
-    dropLifetimeMs: 6_500,
+      "Complete the whole service cycle with protection removed. Recover joint and movement faults, then cool the glowing manifolds as the simulated Quantum Blur thermal view clears.",
+    objective: "Complete the full paired service cycle through joint risk and hands-on cooling.",
+    durationMs: 150_000,
+    dropLifetimeMs: 12_000,
     couplingWindowMs: 1_750,
     interactionFailureRate: 0.4,
     movementFailureRate: 0.31,
     jointProfile: "full-joint",
-    manifestSeed: 19_695,
+    // This simulator seed keeps the established pulse fault and prepares
+    // recoverable movement records across the three distinct tile addresses.
+    manifestSeed: 21_557,
+    demo: {
+      lesson: "joint-risk",
+      showHeat: true,
+      initialHeat: 64,
+      initialHotspotHeat: 80,
+    },
     features: {
       laneBPresentation: "visible",
       interactionRisk: true,
@@ -191,21 +226,28 @@ export const LEVELS: readonly LevelConfig[] = [
       allowBothFail: true,
       allowPrestage: false,
       usefulOffset: true,
+      scriptedCoupleRecords: [[1, 1], [1, 0], [0, 0]],
+      scriptedReadoutRecords: [[0, 0], [0, 1], [0, 0]],
+      movementRiskTiles: [
+        { position: { x: 1, y: 2 } },
+        { position: { x: 2, y: 2 } },
+        { position: { x: 3, y: 2 } },
+      ],
       dropExpiryEnabled: true,
-      pumpTrips: true,
+      pumpTrips: false,
       blockedLines: false,
-      multipleHotspots: true,
+      multipleHotspots: false,
     },
     heat: THERMAL_LATER_GAME,
     jobs: [
       demoJob({
         levelId: 4,
         label: "Coupled Stress Test",
-        left: ["H", "P"],
-        right: ["X", "H"],
+        left: ["H"],
+        right: ["H"],
         coupledGate: "CX",
         courierLane: "B",
-        deadlineMs: 140_000,
+        deadlineMs: null,
       }),
     ],
   }),
