@@ -112,16 +112,6 @@ async function browserState(page: Page): Promise<BrowserState> {
   });
 }
 
-async function simulationTime(page: Page): Promise<number> {
-  return page.evaluate(() => {
-    const api = (window as typeof window & {
-      __UNDERCOOLED__?: { state: () => { simTimeMs: number } };
-    }).__UNDERCOOLED__;
-    if (!api) throw new Error("Undercooled debug API is unavailable.");
-    return api.state().simTimeMs;
-  });
-}
-
 async function startLevel(page: Page, levelId: number): Promise<void> {
   await page.evaluate((id) => {
     const api = (window as typeof window & {
@@ -139,12 +129,12 @@ async function move(
   count = 1,
 ): Promise<void> {
   for (let index = 0; index < count; index += 1) {
-    const before = await simulationTime(page);
     await page.keyboard.press(key);
-    await expect.poll(async () => {
-      const state = await browserState(page);
-      return state.phase !== "running" || (await simulationTime(page)) >= before + 160;
-    }, { timeout: 8_000 }).toBe(true);
+    // Movement resolves synchronously in the v0.5 simulation. Yield only long
+    // enough for Phaser and the DOM HUD to paint before the next real keypress;
+    // waiting on simulated time here lets slow WebGL runners heat the game while
+    // the test harness polls an obsolete movement lock.
+    await page.waitForTimeout(80);
   }
 }
 
