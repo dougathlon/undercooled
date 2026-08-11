@@ -55,7 +55,7 @@ describe("v0.4 demo visual asset contract", () => {
     expect(bytes[25]).toBe(contract.rgba ? 6 : 2);
   });
 
-  test("the complete runtime art set stays within a phone-conscious budget", () => {
+  test("the complete runtime art set stays within a browser-shipping budget", () => {
     const totalBytes = contracts.reduce((total, contract) => total + readPng(contract).byteLength, 0);
     expect(totalBytes).toBeLessThan(8 * 1_024 * 1_024);
   });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COUPLE_BUFFER_POSITION,
   COUPLE_POSITION,
   LANCE_RACK_POSITION,
   PULSE_BUFFER_POSITION,
@@ -19,7 +20,6 @@ import {
   acceptAndPrepare,
   advanceFor,
   collectAndInstallNextPulses,
-  holdInteract,
   placeBoth,
   placeLane,
   pressInteract,
@@ -95,19 +95,15 @@ describe("whole paired service workflow", () => {
     expect(state.events.some((event) => event.type === "coupling-armed")).toBe(true);
   });
 
-  it("collects only each lane's next expected pulse under aligned shared movement", () => {
+  it("collects the same H cartridge from matching supplies on both sides", () => {
     const state = start(createGameState(2, 223));
     state.currentJob.stage = "load";
 
     placeBoth(state, SUPPLY_POSITIONS.H, "out");
     pressInteract(state);
     expect(state.items[state.lanes.A.actor.heldItemId ?? ""]?.kind).toBe("pulse-H");
-    expect(state.lanes.B.actor.heldItemId).toBeNull();
-
-    placeBoth(state, SUPPLY_POSITIONS.X, "out");
-    pressInteract(state);
-    expect(state.items[state.lanes.A.actor.heldItemId ?? ""]?.kind).toBe("pulse-H");
-    expect(state.items[state.lanes.B.actor.heldItemId ?? ""]?.kind).toBe("pulse-X");
+    expect(state.items[state.lanes.B.actor.heldItemId ?? ""]?.kind).toBe("pulse-H");
+    expect(state.lanes.A.actor.position).toEqual(state.lanes.B.actor.position);
   });
 
   it("keeps the hidden coworker mechanically active and reveals it at run two start", () => {
@@ -131,10 +127,9 @@ describe("persistent risk recovery", () => {
   it("records only the channel that actually activates an out-of-phase risk address", () => {
     const state = start(createGameState(3));
     acceptAndPrepare(state);
-
-    placeLane(state, "A", SUPPLY_POSITIONS.H, "out");
-    placeLane(state, "B", { x: 1, y: 3 }, "down");
+    placeBoth(state, SUPPLY_POSITIONS.H, "out");
     pressInteract(state);
+    placeLane(state, "B", { x: 1, y: 3 }, "down");
     placeLane(state, "A", PULSE_POSITION, "up");
     pressInteract(state);
 
@@ -148,9 +143,12 @@ describe("persistent risk recovery", () => {
 
   it("recovers the scripted one-sided pulse fumble and retries with the next cached record", () => {
     const state = start(createGameState(3));
-    acceptAndPrepare(state);
     const address = riskAddress(3, "PULSE", "interaction");
-    collectAndInstallNextPulses(state);
+    acceptAndPrepare(state);
+    placeBoth(state, SUPPLY_POSITIONS.H, "out");
+    pressInteract(state);
+    placeBoth(state, PULSE_POSITION, "up");
+    pressInteract(state);
 
     expect(state.lanes.A.job.loadedPulses).toEqual(["H"]);
     const dropped = Object.values(state.items).find(
@@ -168,33 +166,94 @@ describe("persistent risk recovery", () => {
 
     placeLane(state, "B", PULSE_POSITION, "up");
     pressInteract(state);
-    expect(state.lanes.B.job.loadedPulses).toEqual(["X"]);
-    expect(state.currentJob.stage).toBe("load");
+    expect(state.lanes.B.job.loadedPulses).toEqual(["H"]);
+    expect(state.currentJob.stage).toBe("canister");
+    expect(state.phase).toBe("running");
     expect(state.manifest.riskStreams[address].cursor).toBe(2);
     expect(state.score.recoveries).toBe(1);
   });
 
-  it("expires a dropped cartridge and authorizes exactly that replacement kind", () => {
+  it("expires dropped coupling halves and authorizes exactly those replacements", () => {
     const state = start(createGameState(4, 444));
-    acceptAndPrepare(state);
-    const address = riskAddress(4, "PULSE", "interaction");
-    state.manifest.riskStreams[address].records[0].bits = [0, 1];
-    collectAndInstallNextPulses(state);
+    state.currentJob.stage = "couple-install";
+    for (const laneId of ["A", "B"] as const) {
+      state.lanes[laneId].job.prepared = true;
+      state.lanes[laneId].job.loadedPulses = [...state.currentJob.definition.pulses[laneId]];
+    }
+    placeBoth(state, SUPPLY_POSITIONS.AUX, "out");
+    pressInteract(state);
+    placeBoth(state, COUPLE_POSITION, "up");
+    pressInteract(state);
+    expect(Object.values(state.items).filter((item) => item.location.kind === "dropped")).toHaveLength(2);
     expect(state.lanes.B.replacementKind).toBeNull();
 
     advanceFor(state, state.level.dropLifetimeMs + 100);
 
-    expect(state.lanes.B.replacementKind).toBe("pulse-X");
-    expect(state.score.expiries).toBe(1);
+    expect(state.lanes.A.replacementKind).toBe("coupling-half");
+    expect(state.lanes.B.replacementKind).toBe("coupling-half");
+    expect(state.score.expiries).toBe(2);
     expect(state.events.some((event) => event.type === "object-expired")).toBe(true);
   });
 });
 
 describe("classical cooling and cached shot integrity", () => {
+  it("returns and reissues cryo lances without counting the rack action as cooling", () => {
+    const state = start(createGameState(4, 554));
+    state.currentJob.stage = "couple-install";
+    state.manifest.riskStreams[riskAddress(4, "COUPLE", "interaction")].records[0].bits = [0, 0];
+    for (const laneId of ["A", "B"] as const) {
+      state.lanes[laneId].job.prepared = true;
+      state.lanes[laneId].job.loadedPulses = [...state.currentJob.definition.pulses[laneId]];
+    }
+
+    placeBoth(state, SUPPLY_POSITIONS.AUX, "out");
+    pressInteract(state);
+    placeBoth(state, COUPLE_POSITION, "up");
+    pressInteract(state);
+    pressInteract(state);
+    placeBoth(state, LANCE_RACK_POSITION, "down");
+    pressInteract(state);
+    const completedServicesBeforeReturn = state.cooling.completedServices;
+
+    pressInteract(state);
+
+    expect(state.lanes.A.actor.heldItemId).toBeNull();
+    expect(state.lanes.B.actor.heldItemId).toBeNull();
+    expect(state.cooling.completedServices).toBe(completedServicesBeforeReturn);
+    expect(state.events.filter((event) => event.type === "item-returned")).toHaveLength(2);
+
+    pressInteract(state);
+    expect(state.items[state.lanes.A.actor.heldItemId ?? ""]?.kind).toBe("cryo-lance");
+    expect(state.items[state.lanes.B.actor.heldItemId ?? ""]?.kind).toBe("cryo-lance");
+
+    for (const hotspot of state.cooling.hotspots) hotspot.active = false;
+    placeLane(state, "A", LANCE_RACK_POSITION, "down");
+    placeLane(state, "B", { x: 4, y: 1 }, "in");
+    pressInteract(state);
+    expect(state.lanes.A.actor.heldItemId).toBeNull();
+    expect(state.items[state.lanes.B.actor.heldItemId ?? ""]?.kind).toBe("cryo-lance");
+
+    placeBoth(state, LANCE_RACK_POSITION, "down");
+    pressInteract(state);
+    expect(state.lanes.B.actor.heldItemId).toBeNull();
+    expect(state.cooling.completedServices).toBe(completedServicesBeforeReturn);
+  });
+
   it("carries and aims the cryo lance while leaving both manifest cursors untouched", () => {
     const state = start(createGameState(4, 555));
     debugSetHeat(state, 82);
     for (const hotspot of state.cooling.hotspots) hotspot.heat = 60;
+    state.currentJob.stage = "couple-install";
+    for (const laneId of ["A", "B"] as const) {
+      state.lanes[laneId].job.prepared = true;
+      state.lanes[laneId].job.loadedPulses = [...state.currentJob.definition.pulses[laneId]];
+    }
+    state.manifest.riskStreams[riskAddress(4, "COUPLE", "interaction")].records[0].bits = [0, 0];
+    placeBoth(state, SUPPLY_POSITIONS.AUX, "out");
+    pressInteract(state);
+    placeBoth(state, COUPLE_POSITION, "up");
+    pressInteract(state);
+    pressInteract(state);
     placeBoth(state, LANCE_RACK_POSITION, "down");
     pressInteract(state);
     expect(Object.values(state.items).filter((item) => item.kind === "cryo-lance")).toHaveLength(2);
@@ -202,16 +261,21 @@ describe("classical cooling and cached shot integrity", () => {
     placeBoth(state, { x: 4, y: 1 }, "in");
     const manifestBefore = structuredClone(state.manifest);
     const heatBefore = state.cooling.load;
-    holdInteract(state, 1_000);
+    dispatchCommand(state, { type: "interact-down" });
+    advanceFor(state, 1_000);
 
     expect(state.cooling.load).toBeLessThan(heatBefore);
     expect(state.manifest).toEqual(manifestBefore);
     expect(state.lanes.A.actor.heldItemId).not.toBeNull();
     expect(state.lanes.B.actor.heldItemId).not.toBeNull();
+
+    dispatchCommand(state, { type: "move", direction: "down" });
+    expect(state.interactHeld).toBe(false);
+    expect(state.activeHoldLanes).toEqual([]);
   });
 
   it("consumes a shot unchanged when thermal service rejects the attempt", () => {
-    const state = start(createGameState(3, 666));
+    const state = start(createGameState(1, 666));
     const job = state.currentJob;
     job.stage = "run";
     job.acceptedAtMs = 0;
@@ -221,8 +285,6 @@ describe("classical cooling and cached shot integrity", () => {
       state.lanes[laneId].job.prepared = true;
       state.lanes[laneId].job.preparationExpiresAtMs = 60_000;
     }
-    const riskAddressId = riskAddress(3, "READOUT", "interaction");
-    state.manifest.riskStreams[riskAddressId].records[0].bits = [0, 0];
     const expectedShot = state.manifest.shotStreams[job.definition.id].records[0];
     debugSetHeat(state, 80);
     placeBoth(state, READOUT_POSITION, "up");

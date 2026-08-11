@@ -264,6 +264,14 @@ export interface GameEvent {
 
 export type JointProfile = "protected" | "reciprocal-no-double" | "full-joint";
 export type LaneBPresentation = "veiled" | "reveal-on-start" | "visible";
+export type DemoLesson = "hidden-pair" | "synchronous-pair" | "protected-risk" | "joint-risk";
+
+export interface DemoFlowConfig {
+  lesson: DemoLesson;
+  showHeat: boolean;
+  initialHeat: number;
+  initialHotspotHeat: number;
+}
 
 export interface HeatProfile {
   maximum: number;
@@ -279,6 +287,11 @@ export interface HeatProfile {
   pumpRestartHoldMs: number;
 }
 
+export interface MovementRiskTile {
+  position: GridPosition;
+  scriptedRecords?: readonly BitPair[];
+}
+
 export interface LevelFeatures {
   laneBPresentation: LaneBPresentation;
   interactionRisk: boolean;
@@ -290,6 +303,11 @@ export interface LevelFeatures {
   guidedCoolingAfterJobs?: number;
   scriptedPulseFirst?: BitPair;
   scriptedMovementFirst?: BitPair;
+  scriptedPulseRecords?: readonly BitPair[];
+  scriptedCoupleRecords?: readonly BitPair[];
+  scriptedReadoutRecords?: readonly BitPair[];
+  scriptedMovementRecords?: readonly BitPair[];
+  movementRiskTiles?: readonly MovementRiskTile[];
   dropExpiryEnabled: boolean;
   pumpTrips: boolean;
   blockedLines: boolean;
@@ -312,6 +330,7 @@ export interface LevelConfig {
   movementFailureRate: number;
   jointProfile: JointProfile;
   manifestSeed?: number;
+  demo: DemoFlowConfig;
   features: LevelFeatures;
   heat: HeatProfile;
   jobs: JobDefinition[];

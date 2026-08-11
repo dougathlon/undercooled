@@ -6,21 +6,20 @@ interface RuntimeFixtures {
   runtimeErrors: string[];
 }
 
-interface ActorPositions {
-  A: { x: number; y: number };
-  B: { x: number; y: number };
-}
-
-interface StateMeta {
+interface BrowserState {
   phase: string;
   levelId: number;
-}
-
-interface GameplaySummary {
   stage: string;
-  acceptedJobs: number;
-  validShots: number;
   laneBRevealed: boolean;
+  recoveries: number;
+  riskCount: number;
+  coolingServices: number;
+  validShots: number;
+  acceptedJobs: number;
+  resetCount: number;
+  fumbleCount: number;
+  held: { A: string | null; B: string | null };
+  positions: { A: { x: number; y: number }; B: { x: number; y: number } };
 }
 
 const applicationOrigin = new URL(
@@ -46,7 +45,6 @@ const test = base.extend<RuntimeFixtures>({
     });
 
     await use(errors);
-
     expect(errors, "The production build emitted runtime, console, request, or asset errors.").toEqual([]);
   },
 });
@@ -72,26 +70,59 @@ async function capture(page: Page, filename: string): Promise<void> {
   });
 }
 
-async function stateMeta(page: Page): Promise<StateMeta> {
+async function browserState(page: Page): Promise<BrowserState> {
   return page.evaluate(() => {
     const api = (window as typeof window & {
       __UNDERCOOLED__?: { state: () => unknown };
     }).__UNDERCOOLED__;
     if (!api) throw new Error("Undercooled debug API is unavailable.");
     const state = api.state() as {
-      phase?: unknown;
-      level?: { id?: unknown };
-      levelId?: unknown;
+      phase: string;
+      level: { id: number };
+      currentJob: { stage: string };
+      laneBRevealed: boolean;
+      score: { recoveries: number; validShots: number; acceptedJobs: number };
+      manifest: { riskStreams: Record<string, { cursor: number }> };
+      cooling: { completedServices: number };
+      lanes: Record<"A" | "B", { actor: { position: { x: number; y: number }; heldItemId: string | null } }>;
+      items: Record<string, { kind: string }>;
+      events: Array<{ type: string }>;
     };
-    const levelId = state.level?.id ?? state.levelId;
-    if (typeof state.phase !== "string" || typeof levelId !== "number") {
-      throw new Error("Debug state does not expose stable phase and level identifiers.");
-    }
-    return { phase: state.phase, levelId };
+    return {
+      phase: state.phase,
+      levelId: state.level.id,
+      stage: state.currentJob.stage,
+      laneBRevealed: state.laneBRevealed,
+      recoveries: state.score.recoveries,
+      riskCount: Object.values(state.manifest.riskStreams).reduce((sum, stream) => sum + stream.cursor, 0),
+      coolingServices: state.cooling.completedServices,
+      validShots: state.score.validShots,
+      acceptedJobs: state.score.acceptedJobs,
+      resetCount: state.events.filter((event) => event.type === "processor-reset").length,
+      fumbleCount: state.events.filter((event) => event.type === "fumble").length,
+      held: {
+        A: state.lanes.A.actor.heldItemId ? state.items[state.lanes.A.actor.heldItemId]?.kind ?? null : null,
+        B: state.lanes.B.actor.heldItemId ? state.items[state.lanes.B.actor.heldItemId]?.kind ?? null : null,
+      },
+      positions: {
+        A: state.lanes.A.actor.position,
+        B: state.lanes.B.actor.position,
+      },
+    };
   });
 }
 
-async function startLevel(page: Page, levelId: number): Promise<StateMeta> {
+async function simulationTime(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const api = (window as typeof window & {
+      __UNDERCOOLED__?: { state: () => { simTimeMs: number } };
+    }).__UNDERCOOLED__;
+    if (!api) throw new Error("Undercooled debug API is unavailable.");
+    return api.state().simTimeMs;
+  });
+}
+
+async function startLevel(page: Page, levelId: number): Promise<void> {
   await page.evaluate((id) => {
     const api = (window as typeof window & {
       __UNDERCOOLED__?: { startLevel: (selectedLevel: number) => unknown };
@@ -99,71 +130,10 @@ async function startLevel(page: Page, levelId: number): Promise<StateMeta> {
     if (!api) throw new Error("Undercooled debug API is unavailable.");
     api.startLevel(id);
   }, levelId);
-  return stateMeta(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ phase: "running", levelId });
 }
 
-async function actorPositions(page: Page): Promise<ActorPositions> {
-  return page.evaluate(() => {
-    const api = (window as typeof window & {
-      __UNDERCOOLED__?: { state: () => unknown };
-    }).__UNDERCOOLED__;
-    if (!api) throw new Error("Undercooled debug API is unavailable.");
-    const state = api.state() as {
-      actors?: Record<"A" | "B", { position?: { x: number; y: number } }>;
-      lanes?: Record<"A" | "B", { actor?: { position?: { x: number; y: number } } }>;
-    };
-    const actorA = state.actors?.A ?? state.lanes?.A?.actor;
-    const actorB = state.actors?.B ?? state.lanes?.B?.actor;
-    if (!actorA?.position || !actorB?.position) {
-      throw new Error("Debug state does not expose both actor positions.");
-    }
-    return { A: actorA.position, B: actorB.position };
-  });
-}
-
-async function simulationTime(page: Page): Promise<number> {
-  return page.evaluate(() => {
-    const api = (window as typeof window & {
-      __UNDERCOOLED__?: { state: () => unknown };
-    }).__UNDERCOOLED__;
-    if (!api) throw new Error("Undercooled debug API is unavailable.");
-    const state = api.state() as { simTimeMs?: unknown };
-    if (typeof state.simTimeMs !== "number") {
-      throw new Error("Debug state does not expose the simulation clock.");
-    }
-    return state.simTimeMs;
-  });
-}
-
-async function gameplaySummary(page: Page): Promise<GameplaySummary> {
-  return page.evaluate(() => {
-    const api = (window as typeof window & {
-      __UNDERCOOLED__?: { state: () => unknown };
-    }).__UNDERCOOLED__;
-    if (!api) throw new Error("Undercooled debug API is unavailable.");
-    const state = api.state() as {
-      currentJob?: { stage?: unknown };
-      score?: { acceptedJobs?: unknown; validShots?: unknown };
-      laneBRevealed?: unknown;
-    };
-    if (
-      typeof state.currentJob?.stage !== "string" ||
-      typeof state.score?.acceptedJobs !== "number" ||
-      typeof state.score.validShots !== "number" ||
-      typeof state.laneBRevealed !== "boolean"
-    ) {
-      throw new Error("Debug state does not expose the v2 gameplay summary.");
-    }
-    return {
-      stage: state.currentJob.stage,
-      acceptedJobs: state.score.acceptedJobs,
-      validShots: state.score.validShots,
-      laneBRevealed: state.laneBRevealed,
-    };
-  });
-}
-
-async function pressMovement(
+async function move(
   page: Page,
   key: "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight",
   count = 1,
@@ -171,294 +141,318 @@ async function pressMovement(
   for (let index = 0; index < count; index += 1) {
     const before = await simulationTime(page);
     await page.keyboard.press(key);
-    // The simulation intentionally debounces movement in simulation time. Pace
-    // discrete player inputs against that clock so a slow software renderer
-    // cannot collapse two valid keypresses into the same movement-lock window.
-    await expect
-      .poll(() => simulationTime(page), { timeout: 8_000 })
-      .toBeGreaterThanOrEqual(before + 160);
+    await expect.poll(async () => {
+      const state = await browserState(page);
+      return state.phase !== "running" || (await simulationTime(page)) >= before + 160;
+    }, { timeout: 8_000 }).toBe(true);
   }
 }
 
-async function pressAction(page: Page): Promise<void> {
+async function act(page: Page): Promise<void> {
   await page.keyboard.press("Space");
-  await page.waitForTimeout(100);
+  await page.waitForTimeout(120);
 }
 
-async function holdActionUntilStage(
-  page: Page,
-  stage: string,
-  timeoutMs = 15_000,
-): Promise<void> {
+async function holdUntilStage(page: Page, stage: string): Promise<void> {
   await page.keyboard.down("Space");
   try {
-    await expect
-      .poll(() => gameplaySummary(page), { timeout: timeoutMs })
-      .toMatchObject({ stage });
+    await expect.poll(() => browserState(page), { timeout: 12_000 }).toMatchObject({ stage });
   } finally {
     await page.keyboard.up("Space");
   }
   await page.waitForTimeout(100);
 }
 
-async function dispatchPointer(
-  page: Page,
-  selector: string,
-  type: "pointerdown" | "pointerup",
-  pointerId: number,
-): Promise<void> {
-  await page.locator(selector).dispatchEvent(type, {
-    pointerType: "touch",
-    pointerId,
-    isPrimary: pointerId === 1,
-    buttons: type === "pointerdown" ? 1 : 0,
+async function runMatchedFrontHalf(page: Page): Promise<void> {
+  await act(page);
+  await move(page, "ArrowLeft", 3);
+  await holdUntilStage(page, "load");
+  await move(page, "ArrowLeft");
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ held: { A: "pulse-H", B: "pulse-H" } });
+  await move(page, "ArrowRight", 2);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ stage: "canister" });
+}
+
+async function runUntilSubmission(page: Page): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await act(page);
+    if ((await browserState(page)).stage === "submission") break;
+  }
+  await expect.poll(() => browserState(page)).toMatchObject({ stage: "submission", validShots: 1 });
+}
+
+async function finishJobFromPulse(page: Page): Promise<void> {
+  await expect(page.locator("[data-ui='headline']")).toContainText("CANISTER");
+  await move(page, "ArrowLeft", 2);
+  await move(page, "ArrowDown", 3);
+  await act(page);
+  await move(page, "ArrowUp", 3);
+  await move(page, "ArrowRight", 4);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ stage: "run" });
+  await runUntilSubmission(page);
+  await act(page);
+  await move(page, "ArrowLeft", 4);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ stage: "reset", acceptedJobs: 1 });
+  await move(page, "ArrowRight", 4);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({
+    phase: "complete",
+    acceptedJobs: 1,
+    validShots: 1,
+    resetCount: 1,
   });
 }
 
-test.describe("desktop production build", () => {
-  test.beforeEach(async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "desktop-chromium", "Desktop-only coverage.");
+async function finishJobFromAuxWithCanister(page: Page): Promise<void> {
+  await act(page);
+  await move(page, "ArrowUp", 3);
+  await move(page, "ArrowRight", 4);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ stage: "run" });
+  await runUntilSubmission(page);
+  await act(page);
+  await move(page, "ArrowLeft", 4);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({ stage: "reset", acceptedJobs: 1 });
+  await move(page, "ArrowRight", 4);
+  await act(page);
+  await expect.poll(() => browserState(page)).toMatchObject({
+    phase: "complete",
+    acceptedJobs: 1,
+    validShots: 1,
+    resetCount: 1,
+  });
+}
+
+test.describe("desktop clarity demo", () => {
+  test.beforeEach(async ({ page }) => {
     await boot(page);
   });
 
-  test("boots from its deployment subpath with public-safe metadata and assets", async ({ page }) => {
+  test("boots from the Pages subpath with one desktop start action", async ({ page }) => {
     const documentBase = new URL("./", page.url());
     expect(documentBase.pathname).toMatch(/\/$/);
     expect(documentBase.pathname).not.toBe("/");
-
-    const assetPaths = await page.locator('script[src], link[rel="stylesheet"][href]').evaluateAll((nodes) =>
-      nodes.map((node) => {
-        if (node instanceof HTMLScriptElement) return new URL(node.src).pathname;
-        return new URL((node as HTMLLinkElement).href).pathname;
-      }),
-    );
-    expect(assetPaths.length).toBeGreaterThan(0);
-    for (const assetPath of assetPaths) {
-      expect(assetPath.startsWith(documentBase.pathname)).toBe(true);
-    }
-
     await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
-    await expect(page.locator("body")).not.toContainText(/control[- ]cassette|Moth auxiliary/i);
-  });
-
-  test("offers four demo runs and enters Solo Service through the player-facing flow", async ({ page }) => {
-    const levelCards = page.locator("[data-testid^='level-']");
-    await expect(levelCards).toHaveCount(4);
-    for (let levelId = 1; levelId <= 4; levelId += 1) {
-      await expect(page.getByTestId(`level-${levelId}`)).toBeVisible();
-    }
-    await capture(page, "desktop-v4-title.png");
+    await expect(page.getByTestId("begin")).toHaveText(/START DEMO/);
+    await expect(page.locator("[data-testid^='level-']")).toHaveCount(4);
+    await expect(page.locator(".uc-touch, .uc-orientation-gate")).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText(/rotate your phone|touch controls/i);
+    await capture(page, "desktop-v5-title.png");
 
     await page.getByTestId("begin").click();
-    await page.getByTestId("start-level").click();
-    await expect.poll(() => stateMeta(page)).toEqual({ phase: "running", levelId: 1 });
+    await expect.poll(() => browserState(page)).toMatchObject({ phase: "running", levelId: 1 });
     await expect(page.getByTestId("overlay")).toBeHidden();
-    await capture(page, "desktop-v4-level-1-start.png");
+    await expect(page.locator("[data-ui='headline']")).toHaveText("ACTIVATE THE READOUT");
+    await capture(page, "desktop-v5-scene-1-start.png");
   });
 
-  test("completes the first paired job through player controls", async ({ page }) => {
-    test.setTimeout(180_000);
+  test("scene one teaches a full service cycle without leaking the hidden coworker", async ({ page }) => {
     await page.getByTestId("begin").click();
-    await page.getByTestId("start-level").click();
+    await expect(page.locator("[data-ui='circuit-b']")).toContainText("SIGNAL OFFLINE");
+    await runMatchedFrontHalf(page);
+    await finishJobFromPulse(page);
 
-    // Accept at the readout, then walk outward to PREP and face its counter.
-    await pressAction(page);
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "prepare" });
-    await pressMovement(page, "ArrowLeft", 3);
-    await pressMovement(page, "ArrowUp");
-    await holdActionUntilStage(page, "load");
-
-    // The first circuit is H/H. Fetch from both outer benches and install at PULSE.
-    await pressMovement(page, "ArrowLeft");
-    await pressAction(page);
-    await pressMovement(page, "ArrowRight", 2);
-    await pressMovement(page, "ArrowUp");
-    await pressAction(page);
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "canister" });
-
-    // Only the designated courier picks up the canister at AUX; both return to READOUT.
-    await pressMovement(page, "ArrowLeft", 2);
-    await pressMovement(page, "ArrowDown", 3);
-    await pressMovement(page, "ArrowLeft");
-    await pressAction(page);
-    await pressMovement(page, "ArrowUp", 3);
-    await pressMovement(page, "ArrowRight", 4);
-    await pressMovement(page, "ArrowUp");
-    await pressAction(page);
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "run" });
-
-    // Run one valid shot, detach its result, submit it, and reset both processor faces.
-    await pressAction(page);
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "submission", validShots: 1 });
-    await pressAction(page);
-    await pressMovement(page, "ArrowLeft", 4);
-    await pressMovement(page, "ArrowUp");
-    await pressAction(page);
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ stage: "reset", acceptedJobs: 1 });
-    await pressMovement(page, "ArrowRight", 4);
-    await pressMovement(page, "ArrowUp");
-    await pressAction(page);
-
-    await expect.poll(() => gameplaySummary(page)).toEqual({
-      stage: "reset",
-      acceptedJobs: 1,
-      validShots: 1,
+    await expect.poll(() => browserState(page)).toMatchObject({
+      phase: "complete",
+      levelId: 1,
       laneBRevealed: false,
     });
-    await expect.poll(() => stateMeta(page)).toEqual({ phase: "complete", levelId: 1 });
-    await expect(page.getByTestId("next-level")).toContainText("Start demo 2");
-    await capture(page, "desktop-v4-solo-complete.png");
+    await expect(page.getByTestId("overlay")).toContainText("complete service cycle ran on two channels");
+    await expect(page.getByTestId("overlay")).toContainText("ONE COMMAND");
+    await expect(page.getByTestId("overlay")).toContainText("MIRRORS H");
+    await expect(page.getByTestId("overlay")).toContainText("SUBMITTED + RESET");
+    await expect(page.getByTestId("overlay")).not.toContainText("Accepted cycles");
+    await capture(page, "desktop-v5-scene-1-complete.png");
   });
 
-  test("keeps all four authored demos bootable and emits replay v2", async ({ page }) => {
-    for (let levelId = 1; levelId <= 4; levelId += 1) {
-      expect(await startLevel(page, levelId)).toEqual({ phase: "running", levelId });
-      await expect(page.getByTestId("overlay")).toBeHidden();
-    }
+  test("scene two reveals matched H/H work and completes the same full cycle", async ({ page }) => {
+    await startLevel(page, 2);
+    await expect.poll(() => browserState(page)).toMatchObject({ laneBRevealed: true });
+    await expect(page.locator("[data-ui='b-marker']")).toHaveText("B");
+    await runMatchedFrontHalf(page);
+    await finishJobFromPulse(page);
 
-    const versionContract = await page.evaluate(() => {
+    await expect.poll(() => browserState(page)).toMatchObject({ phase: "complete", levelId: 2 });
+    await expect(page.getByTestId("overlay")).toContainText("visibly synchronous work");
+    await expect(page.getByTestId("overlay")).toContainText("INSTALLS H");
+    await expect(page.getByTestId("overlay")).not.toContainText("INSTALLS X");
+    await expect(page.getByTestId("overlay")).toContainText("SUBMITTED + RESET");
+    await capture(page, "desktop-v5-scene-2-complete.png");
+  });
+
+  test("scene three stages one-sided drops, repeated missed steps, readout recovery, and resynchronization", async ({ page }) => {
+    await startLevel(page, 3);
+    await act(page);
+    await move(page, "ArrowLeft", 3);
+    await holdUntilStage(page, "load");
+    await move(page, "ArrowLeft");
+    await act(page);
+    await expect.poll(() => browserState(page)).toMatchObject({ held: { A: "pulse-H", B: "pulse-H" } });
+    await move(page, "ArrowRight", 2);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("COMMIT AT THE PULSE ADDRESS");
+    await expect(page.locator("[data-ui='detail']")).not.toContainText("01");
+    await act(page);
+
+    await expect(page.locator("[data-ui='event-message']")).toContainText(/SCRIPTED TEACHING RECORD.*01 AT PULSE.*B FUMBLES/);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RECOVER THE CARTRIDGE");
+    await expect(page.locator("[data-ui='command']")).toHaveText("MOVE TO BUFFER");
+    await capture(page, "desktop-v5-scene-3-drop.png");
+
+    await move(page, "ArrowDown");
+    await act(page);
+    await expect.poll(() => browserState(page)).toMatchObject({ recoveries: 1 });
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RETRY THE FAILED SIDE");
+    await expect(page.locator("[data-ui='lane-a']")).toHaveText("H ALREADY INSTALLED");
+    await move(page, "ArrowUp");
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("ENTER THE MARKED SQUARE");
+    await move(page, "ArrowDown", 2);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("LEAVE THE MARKED SQUARE");
+    await expect(page.locator("[data-ui='lane-b']")).toHaveText("OUTCOME HIDDEN");
+    await move(page, "ArrowUp");
+
+    await expect.poll(() => browserState(page)).toMatchObject({
+      riskCount: 3,
+      positions: { A: { x: 2, y: 1 }, B: { x: 2, y: 2 } },
+    });
+    await expect(page.locator("[data-ui='event-message']")).toContainText(/SIMULATOR FALLBACK.*01 AT TRANSFER.*B MISSES A STEP/);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RESYNCHRONIZE AT THE BARRIER");
+    await capture(page, "desktop-v5-scene-3-offset.png");
+
+    await move(page, "ArrowUp", 3);
+    await expect.poll(() => browserState(page)).toMatchObject({ phase: "running", levelId: 3, stage: "canister" });
+    await finishJobFromPulse(page);
+    await expect(page.getByTestId("overlay")).toContainText("SCRIPTED · PULSE 01");
+    await expect(page.getByTestId("overlay")).toContainText("SIMULATOR · TRANSFER 00");
+    await expect(page.getByTestId("overlay")).toContainText("SCRIPTED · READOUT 01");
+    await expect(page.getByTestId("overlay")).toContainText("B SUCCEEDS");
+    await expect(page.getByTestId("overlay")).toContainText("SUBMITTED + RESET");
+  });
+
+  test("scene four separates repeated joint faults from physical cryo-lance cooling", async ({ page }) => {
+    test.setTimeout(120_000);
+    await startLevel(page, 4);
+    await act(page);
+    await move(page, "ArrowLeft", 3);
+    await holdUntilStage(page, "load");
+    await move(page, "ArrowLeft");
+    await act(page);
+    await move(page, "ArrowRight", 2);
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RECOVER THE CARTRIDGE");
+    await move(page, "ArrowDown");
+    await act(page);
+    await move(page, "ArrowUp");
+    await act(page);
+    await expect.poll(() => browserState(page)).toMatchObject({ stage: "couple-install" });
+    await move(page, "ArrowLeft", 2);
+    await move(page, "ArrowDown", 3);
+    await act(page);
+    await move(page, "ArrowUp", 3);
+    await move(page, "ArrowRight", 3);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("COMMIT AT THE COUPLED ADDRESS");
+    await expect(page.locator("[data-ui='detail']")).not.toContainText("11");
+    await act(page);
+    await expect(page.locator("[data-ui='event-message']")).toContainText(/SCRIPTED TEACHING RECORD.*11 AT COUPLE.*A \+ B FUMBLES/);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RECOVER BOTH HALVES");
+    await capture(page, "desktop-v5-scene-4-joint-drop.png");
+
+    await move(page, "ArrowDown");
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RETRY BOTH COUPLING HALVES");
+    await move(page, "ArrowUp");
+    await act(page);
+    await expect(page.locator("[data-ui='event-message']")).toContainText(/SCRIPTED TEACHING RECORD.*10 AT COUPLE.*A FUMBLES/);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RECOVER THE COUPLING HALF");
+    await move(page, "ArrowDown");
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RETRY THE FAILED COUPLING HALF");
+    await expect(page.locator("[data-ui='lane-b']")).toHaveText("PORT ALREADY LOCKED");
+    await move(page, "ArrowUp");
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("ARM BOTH PORTS TOGETHER");
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("FETCH THE CRYO LANCES");
+    await expect(page.locator("[data-ui='detail']")).toContainText("does not change the cached quantum result");
+    await expect(page.locator("[data-ui='heat-panel']")).toBeVisible();
+    await expect(page.locator("[data-ui='heat-label']")).toHaveText("QUANTUM BLUR · SIMULATED");
+    await expect(page.locator("canvas")).toHaveAttribute("data-quantum-blur", "simulated");
+    const hotBlur = await page.locator("canvas").evaluate((canvas) =>
+      Number.parseFloat((canvas as HTMLCanvasElement).style.getPropertyValue("--uc-quantum-blur")),
+    );
+    expect(hotBlur).toBeGreaterThan(2);
+
+    await move(page, "ArrowLeft", 2);
+    await move(page, "ArrowDown", 3);
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("RESYNCHRONIZE AT THE BARRIER");
+    await move(page, "ArrowDown");
+    await act(page);
+    await expect(page.locator("[data-ui='headline']")).toHaveText("SPRAY THE GLOWING MANIFOLDS");
+    await move(page, "ArrowRight", 3);
+    await move(page, "ArrowUp", 2);
+    await expect(page.locator("[data-ui='command']")).toHaveText("HOLD ACTION");
+    await page.keyboard.down("Space");
+    try {
+      await expect(page.locator("[data-ui='headline']")).toHaveText("RETURN THE CRYO LANCES", { timeout: 12_000 });
+      await capture(page, "desktop-v5-scene-4-cooling.png");
+    } finally {
+      await page.keyboard.up("Space");
+    }
+    await move(page, "ArrowDown", 2);
+    await move(page, "ArrowLeft", 3);
+    await act(page);
+    await expect(page.locator("canvas")).toHaveAttribute("data-quantum-blur", "off");
+    await expect(page.locator("[data-ui='headline']")).toHaveText("FETCH THE RED CANISTER");
+    await move(page, "ArrowLeft");
+    await finishJobFromAuxWithCanister(page);
+    expect(await browserState(page)).toMatchObject({ coolingServices: expect.any(Number), fumbleCount: 5 });
+    expect((await browserState(page)).coolingServices).toBeGreaterThan(0);
+    await expect(page.getByTestId("overlay")).toContainText("SCRIPTED · COUPLE 10");
+    await expect(page.getByTestId("overlay")).toContainText("SCRIPTED · READOUT 01");
+    await expect(page.getByTestId("overlay")).toContainText("SIMULATED · QUANTUM BLUR");
+    await expect(page.getByTestId("overlay")).toContainText("VISUALIZES HEAT ONLY");
+    await expect(page.getByTestId("overlay")).toContainText("CLASSICAL · CRYO SPRAY");
+    await expect(page.getByTestId("overlay")).toContainText("LOWERS HEAT ONLY");
+    await expect(page.getByTestId("overlay")).toContainText("SUBMITTED + RESET");
+  });
+
+  test("all four openings and the replay contract remain stable", async ({ page }) => {
+    const expectedStages = ["accept", "accept", "accept", "accept"];
+    for (let levelId = 1; levelId <= 4; levelId += 1) {
+      await startLevel(page, levelId);
+      await expect.poll(() => browserState(page)).toMatchObject({ stage: expectedStages[levelId - 1] });
+    }
+    const contracts = await page.evaluate(() => {
       const api = (window as typeof window & {
         __UNDERCOOLED__?: { state: () => unknown; dumpReplay: () => string };
       }).__UNDERCOOLED__;
       if (!api) throw new Error("Undercooled debug API is unavailable.");
-      const state = api.state() as {
-        format?: unknown;
-        currentJob?: { stage?: unknown };
-        manifest?: { format?: unknown };
-      };
+      const state = api.state() as { format: string; manifest: { format: string } };
       return {
         state: state.format,
-        manifest: state.manifest?.format,
-        stage: state.currentJob?.stage,
-        replay: (JSON.parse(api.dumpReplay()) as { format?: unknown }).format,
+        manifest: state.manifest.format,
+        replay: (JSON.parse(api.dumpReplay()) as { format: string }).format,
       };
     });
-    expect(versionContract).toEqual({
+    expect(contracts).toEqual({
       state: "undercooled-state-v2",
       manifest: "undercooled-manifest-v2",
-      stage: "accept",
       replay: "undercooled-replay-v2",
     });
-    await capture(page, "desktop-v4-level-4.png");
   });
 
-  test("reveals the coworker at demo two start", async ({ page }) => {
-    expect(await startLevel(page, 2)).toEqual({ phase: "running", levelId: 2 });
-    await expect.poll(() => gameplaySummary(page)).toMatchObject({ laneBRevealed: true });
-    await expect(page.locator("[data-ui='lane-b']")).not.toContainText("VEILED");
-    await capture(page, "desktop-v4-level-2-reveal.png");
-  });
-
-  test("shows the guaranteed B-side drop and simulator-cache missed step in demo three", async ({ page }) => {
-    test.setTimeout(180_000);
-    await startLevel(page, 3);
-
-    await pressAction(page);
-    await pressMovement(page, "ArrowLeft", 3);
-    await pressMovement(page, "ArrowUp");
-    await holdActionUntilStage(page, "load");
-
-    await pressMovement(page, "ArrowLeft");
-    await pressAction(page);
-    await pressMovement(page, "ArrowDown");
-    await pressMovement(page, "ArrowLeft");
-    await pressAction(page);
-    await pressMovement(page, "ArrowRight", 2);
-    await pressMovement(page, "ArrowUp");
-    await pressAction(page);
-
-    await expect(page.locator("[data-ui='event-message']")).toContainText(/SCRIPTED DEMO · 01 · PULSE → B FUMBLES/);
-    await expect(page.locator("[data-ui='objective']")).toContainText(/RECOVER.*Channel B/i);
-    await capture(page, "desktop-v4-level-3-b-drop.png");
-
-    await pressMovement(page, "ArrowDown");
-    await pressAction(page);
-    await pressMovement(page, "ArrowUp");
-    await pressAction(page);
-
-    await pressMovement(page, "ArrowLeft", 2);
-    await pressAction(page);
-    await pressMovement(page, "ArrowDown", 2);
-    await pressMovement(page, "ArrowLeft");
-    await pressAction(page);
-    await pressMovement(page, "ArrowRight", 2);
-    await pressMovement(page, "ArrowUp");
-
-    const positions = await actorPositions(page);
-    expect(positions).toEqual({ A: { x: 2, y: 1 }, B: { x: 2, y: 2 } });
-    await expect(page.locator("[data-ui='event-message']")).toContainText(/SIMULATOR CACHE · 01 · TRANSFER → B MISSES A STEP/);
-    await expect(page.locator("[data-ui='objective']")).toContainText("RESYNCHRONIZE");
-    await capture(page, "desktop-v4-level-3-b-missed-step.png");
-
-    await pressMovement(page, "ArrowUp", 2);
-    await expect(page.locator("[data-ui='objective']")).not.toContainText("RESYNCHRONIZE");
-  });
-
-  test("pause and resume preserve the active shift", async ({ page }) => {
+  test("pause and resume preserve the active scene", async ({ page }) => {
     await startLevel(page, 1);
     await page.keyboard.press("Escape");
-    await expect.poll(() => stateMeta(page)).toEqual({ phase: "paused", levelId: 1 });
+    await expect.poll(() => browserState(page)).toMatchObject({ phase: "paused", levelId: 1 });
     await expect(page.getByTestId("resume")).toBeVisible();
-
     await page.getByTestId("resume").click();
-    await expect.poll(() => stateMeta(page)).toEqual({ phase: "running", levelId: 1 });
-    await expect(page.getByTestId("overlay")).toBeHidden();
-  });
-});
-
-test.describe("Pixel 7 landscape production build", () => {
-  test.beforeEach(async ({ page }, testInfo) => {
-    test.skip(
-      testInfo.project.name !== "pixel-7-landscape-chromium",
-      "Pixel-landscape-only touch coverage.",
-    );
-    await boot(page);
-    await startLevel(page, 1);
-  });
-
-  test("shows semantic mirrored controls without horizontal overflow", async ({ page }) => {
-    const touchControls = page.getByTestId("touch-controls");
-    const inward = page.locator('[data-move="in"]');
-    const outward = page.locator('[data-move="out"]');
-    await expect(touchControls).toBeVisible();
-    await expect(inward).toBeVisible();
-    await expect(outward).toBeVisible();
-
-    const viewport = await page.evaluate(() => ({
-      width: window.innerWidth,
-      height: window.innerHeight,
-      documentWidth: document.documentElement.scrollWidth,
-    }));
-    expect(viewport.width).toBeGreaterThan(viewport.height);
-    expect(viewport.documentWidth).toBeLessThanOrEqual(viewport.width + 1);
-  });
-
-  test("IN advances both mirrored local coordinates toward the processor", async ({ page }) => {
-    const processorEdge = await actorPositions(page);
-    await page.locator('[data-move="out"]').tap();
-    const outward = await actorPositions(page);
-    expect(outward).toEqual({
-      A: { x: processorEdge.A.x - 1, y: processorEdge.A.y },
-      B: { x: processorEdge.B.x - 1, y: processorEdge.B.y },
-    });
-
-    await page.locator('[data-move="in"]').tap();
-    await expect.poll(() => actorPositions(page)).toEqual(processorEdge);
-  });
-
-  test("keeps the held action active while a second touch moves", async ({ page }) => {
-    const before = await actorPositions(page);
-    await dispatchPointer(page, '[data-testid="interact"]', "pointerdown", 1);
-    await dispatchPointer(page, '[data-move="down"]', "pointerdown", 2);
-    await dispatchPointer(page, '[data-move="down"]', "pointerup", 2);
-    await dispatchPointer(page, '[data-testid="interact"]', "pointerup", 1);
-
-    await expect(page.getByTestId("touch-controls")).toBeVisible();
-    await expect(page.locator("canvas")).toBeVisible();
-    await expect.poll(() => actorPositions(page)).toEqual({
-      A: { x: before.A.x, y: before.A.y + 1 },
-      B: { x: before.B.x, y: before.B.y + 1 },
-    });
-    await capture(page, "pixel-7-landscape-v4-active.png");
+    await expect.poll(() => browserState(page)).toMatchObject({ phase: "running", levelId: 1 });
   });
 });

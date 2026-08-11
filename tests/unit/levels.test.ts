@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { LEVELS, getLevel, starsForJobs } from "../../src/simulation/levels";
 import { createGameState } from "../../src/simulation/simulation";
-import { riskAddress } from "../../src/simulation/geometry";
+import { movementRiskAddress, riskAddress } from "../../src/simulation/geometry";
 
 describe("four-run Moth demonstration", () => {
   it("defines four ordered, single-cycle demo runs", () => {
@@ -26,8 +26,8 @@ describe("four-run Moth demonstration", () => {
       expect(level.jobs[0].deadlineMs).toBeNull();
       expect(level.heat.preparationValidityMs).toBeNull();
     }
-    expect(getLevel(4).durationMs).toBe(140_000);
-    expect(getLevel(4).jobs[0].deadlineMs).toBe(140_000);
+    expect(getLevel(4).durationMs).toBe(150_000);
+    expect(getLevel(4).jobs[0].deadlineMs).toBeNull();
   });
 
   it("progresses from hidden deterministic control to protected and full joint risk", () => {
@@ -44,7 +44,8 @@ describe("four-run Moth demonstration", () => {
     });
     expect(levels[3]).toMatchObject({
       jointProfile: "protected",
-      manifestSeed: 31,
+      manifestSeed: 205,
+      demo: { lesson: "protected-risk", showHeat: false },
       features: {
         laneBPresentation: "visible",
         interactionRisk: true,
@@ -54,7 +55,8 @@ describe("four-run Moth demonstration", () => {
     });
     expect(levels[4]).toMatchObject({
       jointProfile: "full-joint",
-      manifestSeed: 19_695,
+      manifestSeed: 21_557,
+      demo: { lesson: "joint-risk", showHeat: true },
       features: {
         laneBPresentation: "visible",
         interactionRisk: true,
@@ -66,10 +68,11 @@ describe("four-run Moth demonstration", () => {
     });
   });
 
-  it("authors legible pickup differences and a coupled later-game run", () => {
+  it("keeps the teaching recipe matched while adding a coupled later-game run", () => {
     expect(getLevel(1).jobs[0].pulses).toEqual({ A: ["H"], B: ["H"] });
-    expect(getLevel(2).jobs[0].pulses).toEqual({ A: ["H"], B: ["X"] });
-    expect(getLevel(3).jobs[0].pulses).toEqual({ A: ["H", "P"], B: ["X", "H"] });
+    expect(getLevel(2).jobs[0].pulses).toEqual({ A: ["H"], B: ["H"] });
+    expect(getLevel(3).jobs[0].pulses).toEqual({ A: ["H"], B: ["H"] });
+    expect(getLevel(4).jobs[0].pulses).toEqual({ A: ["H"], B: ["H"] });
     expect(getLevel(4).jobs[0].coupledGate).toBe("CX");
     expect(() => getLevel(0)).toThrow("Unknown level 0");
     expect(() => getLevel(5)).toThrow("Unknown level 5");
@@ -78,18 +81,29 @@ describe("four-run Moth demonstration", () => {
   it("prevalidates illustrative cached risk sequences for runs three and four", () => {
     const protectedState = createGameState(3);
     const protectedPulse = protectedState.manifest.riskStreams[riskAddress(3, "PULSE", "interaction")];
-    const protectedTransfer = protectedState.manifest.riskStreams[riskAddress(3, "TRANSFER", "movement")];
+    const protectedTiles = protectedState.level.features.movementRiskTiles ?? [];
+    const protectedTransfer = protectedState.manifest.riskStreams[
+      movementRiskAddress(3, protectedTiles[1].position)
+    ];
+    const protectedReadout = protectedState.manifest.riskStreams[riskAddress(3, "READOUT", "interaction")];
     expect(protectedPulse.records.slice(0, 3).map((record) => [record.source, record.bits])).toEqual([
       ["scripted", [0, 1]],
-      ["simulator", [0, 0]],
+      ["scripted", [0, 0]],
+      ["simulator", [0, 1]],
+    ]);
+    expect(protectedTransfer.records.slice(0, 3).map((record) => [record.source, record.bits])).toEqual([
+      ["simulator", [0, 1]],
+      ["simulator", [0, 1]],
       ["simulator", [0, 0]],
     ]);
-    expect(protectedTransfer.records.slice(0, 2).map((record) => record.bits)).toEqual([
-      [0, 1],
-      [0, 0],
+    expect(protectedReadout.records.slice(0, 3).map((record) => [record.source, record.bits])).toEqual([
+      ["scripted", [0, 0]],
+      ["scripted", [0, 1]],
+      ["scripted", [0, 0]],
     ]);
 
     const jointState = createGameState(4);
+    const jointTiles = jointState.level.features.movementRiskTiles ?? [];
     expect(
       jointState.manifest.riskStreams[riskAddress(4, "PULSE", "interaction")].records
         .slice(0, 4)
@@ -97,16 +111,42 @@ describe("four-run Moth demonstration", () => {
     ).toEqual([
       [1, 0],
       [0, 0],
-      [0, 1],
+      [1, 0],
       [0, 0],
     ]);
     expect(
       jointState.manifest.riskStreams[riskAddress(4, "COUPLE", "interaction")].records
-        .slice(0, 2)
+        .slice(0, 3)
         .map((record) => record.bits),
     ).toEqual([
       [1, 1],
+      [1, 0],
       [0, 0],
+    ]);
+    expect(
+      jointState.manifest.riskStreams[riskAddress(4, "READOUT", "interaction")].records
+        .slice(0, 3)
+        .map((record) => record.bits),
+    ).toEqual([
+      [0, 0],
+      [0, 1],
+      [0, 0],
+    ]);
+    expect(jointTiles.map((tile) => tile.position)).toEqual([
+      { x: 1, y: 2 },
+      { x: 2, y: 2 },
+      { x: 3, y: 2 },
+    ]);
+    expect(
+      jointTiles.map((tile) =>
+        jointState.manifest.riskStreams[movementRiskAddress(4, tile.position)].records
+          .slice(0, 2)
+          .map((record) => [record.source, record.bits]),
+      ),
+    ).toEqual([
+      [["simulator", [0, 1]], ["simulator", [0, 0]]],
+      [["simulator", [1, 0]], ["simulator", [0, 0]]],
+      [["simulator", [1, 1]], ["simulator", [0, 0]]],
     ]);
   });
 });

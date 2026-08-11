@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COUPLE_BUFFER_POSITION,
+  LANCE_RACK_POSITION,
   PULSE_BUFFER_POSITION,
   READOUT_BUFFER_POSITION,
   SUPPLY_POSITIONS,
@@ -77,5 +78,7 @@ describe("visual layout contract", () => {
       P: { x: 0, y: 2 },
       AUX: { x: 0, y: 3 },
     });
+    expect(LANCE_RACK_POSITION).toEqual({ x: 1, y: 3 });
+    expect(LANCE_RACK_POSITION).not.toEqual(SUPPLY_POSITIONS.AUX);
   });
 });
